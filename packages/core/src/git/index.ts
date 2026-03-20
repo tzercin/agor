@@ -431,7 +431,10 @@ export async function createWorktree(
     const errorMessage = error instanceof Error ? error.message : String(error);
 
     // Handle stale branch from previously deleted worktree
-    if (createBranch && errorMessage.includes('already exists')) {
+    // Match specifically on git's branch conflict message to avoid catching unrelated errors
+    const isBranchConflict =
+      createBranch && errorMessage.includes('branch') && errorMessage.includes('already exists');
+    if (isBranchConflict) {
       console.warn(
         `⚠️  Branch '${ref}' already exists. Checking if it's orphaned (stale from a deleted worktree)...`
       );
