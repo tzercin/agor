@@ -169,85 +169,166 @@ This means we could implement a hybrid approach: start with search tools, then d
 
 ---
 
-## 4. Build vs Buy Analysis
+## 4. Framework Landscape & Build vs Buy
 
-### Option A: Implement Tool Search in Our Custom Server
+### The Three Contenders
 
-**What:** Add `search_tools` and `call_tool` to `routes.ts`. Keep everything else as-is.
+| Framework | npm | Stars | What It Is |
+|-----------|-----|-------|-----------|
+| **@modelcontextprotocol/sdk** | `@modelcontextprotocol/sdk` | Official | The official MCP SDK. Low-level, protocol-correct. |
+| **FastMCP (TS)** | `fastmcp` | ~3K | Opinionated framework by punkpeye/glama. Built on Hono. |
+| **mcp-framework** | `mcp-framework` | ~1K | Directory-based tool discovery, OAuth 2.1, CLI scaffolding. |
+
+### Feature Comparison
+
+| Feature | Our Custom Server | Official SDK | FastMCP (TS) | mcp-framework |
+|---------|-------------------|-------------|-------------|---------------|
+| **Tool search** | No | No | No | No |
+| **Zod schemas** | No (raw JSON) | Yes | Yes | Yes |
+| **Tool annotations** | No | Yes (read-only, destructive, idempotent) | Yes | Yes |
+| **Streaming/SSE** | Custom (Socket.io) | Yes (Streamable HTTP) | Yes (HTTP Streaming + SSE) | Yes |
+| **Notifications (list_changed)** | No | Yes (built-in) | Yes | Unclear |
+| **Auth** | Custom JWT | Auth helpers | Built-in bearer/sessions | OAuth 2.1 |
+| **Express integration** | Native (it IS Express) | `@modelcontextprotocol/express` middleware | Via `server.getApp()` (Hono) | Standalone only |
+| **Embed in existing server** | N/A | **Yes** — mount at sub-route | **Partial** — Hono app, needs adapter | **No** — standalone process |
+| **Custom HTTP routes** | Yes (FeathersJS) | Via Express app | Yes (`server.addRoute()`) | No |
+| **Progress notifications** | No | Yes | Yes | No |
+| **Sampling/elicitation** | No | Yes (server-initiated) | Yes | No |
+| **Edge runtime** | No | No | Yes (Cloudflare Workers) | No |
+
+### Can They Be a "Plugin" in Our Server?
+
+This is the key constraint — **no separate process, must mount under our existing FeathersJS/Express app**.
+
+#### Official SDK: Yes, this works
+
+The SDK publishes `@modelcontextprotocol/express` which provides `createMcpExpressApp()` with Host header validation. The core pattern:
+
+```typescript
+import { McpServer } from '@modelcontextprotocol/server';
+import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/server/streamableHttp';
+
+// Mount on our existing FeathersJS/Express app at /mcp
+app.post('/mcp', async (req, res) => {
+  const server = new McpServer({ name: 'agor', version: '0.14.3' });
+  // Register tools with Zod schemas
+  server.registerTool('agor_sessions_list', {
+    description: 'List all sessions...',
+    inputSchema: z.object({ limit: z.number().optional(), ... }),
+  }, async (args) => { ... });
+
+  const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+});
+```
+
+This replaces our custom JSON-RPC parsing with the SDK's transport layer, while keeping everything inside the same Express process.
+
+**Benefits beyond tool search:**
+- Protocol correctness for free (JSON-RPC framing, error codes, capability negotiation)
+- `notifications/tools/list_changed` built-in — needed for dynamic tool exposure
+- Tool annotations (mark tools as `destructive`, `readOnlyHint`, `idempotent`) — helps agents make better choices
+- Zod schema validation — catch bad inputs before they hit our services
+- Progress notifications — agents can show progress for long-running operations (environment start, repo clone)
+- Sampling/elicitation — server can ask the LLM questions mid-tool-execution
+- Future protocol changes handled by upgrading the SDK, not patching our code
+
+**What we'd lose:**
+- Direct control over JSON-RPC parsing (but we don't need it)
+- Our custom session token validation would need to wrap the SDK handler
+
+#### FastMCP (TS): Awkward fit
+
+FastMCP uses Hono internally, not Express. You can get the Hono app via `server.getApp()`, but mounting a Hono app inside an Express app requires an adapter. It's designed as a standalone server.
+
+**Verdict:** Not a good fit for our "plugin" requirement. We'd be fighting the framework.
+
+#### mcp-framework: No
+
+Designed as a standalone process with its own CLI. No embedding API.
+
+**Verdict:** Won't work.
+
+### Framework Recommendation
+
+**If we want a framework: go with the Official SDK (`@modelcontextprotocol/sdk`).**
+
+It's the only one that cleanly mounts into our existing Express app. It gives us protocol correctness, notifications, annotations, and Zod validation — all things we'd eventually want anyway. And we'd still build tool search ourselves on top (no framework offers it).
+
+### Updated Options
+
+#### Option A: Add Tool Search to Our Custom Server (Minimal)
+
+Just add `search_tools` + `call_tool` to the existing `routes.ts`. No refactoring.
 
 | Aspect | Assessment |
 |--------|-----------|
 | **Effort** | Low (1-2 days) |
-| **Risk** | Low — additive change, no migration |
+| **Risk** | Low — additive change |
 | **Token savings** | 88-96% |
-| **Maintenance** | We own the search logic |
+| **Framework benefits** | None |
+| **Maintenance** | More custom code to maintain |
 
-**Implementation sketch:**
-1. Add a `toolRegistry` map of all tool definitions
-2. Add `search_tools` tool that does regex/substring matching on the registry
-3. Add `call_tool` tool that dispatches to existing handlers
-4. In `tools/list`, return only synthetic tools + configurable "always visible" set
-5. Optionally: use `notifications/tools/list_changed` to expose discovered tools
+#### Option B: Migrate to Official SDK + Add Tool Search
 
-### Option B: Migrate to @modelcontextprotocol/sdk Server
-
-**What:** Rewrite our MCP server using the official SDK's `McpServer` class.
+Replace our custom JSON-RPC handler with `McpServer` from the official SDK. Add tool search on top.
 
 | Aspect | Assessment |
 |--------|-----------|
-| **Effort** | Medium-High (3-5 days) |
-| **Risk** | Medium — rewrite of working code, potential regressions |
-| **Token savings** | Same as Option A (need to add search ourselves) |
-| **Maintenance** | SDK handles protocol details |
+| **Effort** | Medium (3-5 days) |
+| **Risk** | Medium — rewrite of handler code, but tool definitions stay similar |
+| **Token savings** | 88-96% |
+| **Framework benefits** | Protocol correctness, notifications, annotations, Zod, progress, sampling |
+| **Maintenance** | Less custom code, SDK handles protocol evolution |
 
-**Tradeoffs:**
-- (+) Proper protocol handling, streaming, notifications built-in
-- (+) Could use SDK's tool registration API
-- (-) SDK doesn't include tool search — we'd still need to build it
-- (-) Migration risk for 44 tools + handlers
-- (-) May lose custom features (OAuth proxy, streaming, spawn orchestration)
+**Migration path:** The SDK's `registerTool` API is very close to our current inline definitions. Each tool becomes a `server.registerTool(name, { description, inputSchema: z.object(...) }, handler)` call. The 44 tool handlers mostly stay the same — they already dispatch to FeathersJS services.
 
-### Option C: Migrate to a Framework (e.g., mcp-framework)
+#### Option C: Hybrid Refactor + Tool Search (Previous Recommendation)
 
-**What:** Use a higher-level framework like `mcp-framework` (npm) that provides directory-based tool discovery.
-
-| Aspect | Assessment |
-|--------|-----------|
-| **Effort** | High (5-7 days) |
-| **Risk** | High — framework may not support our custom patterns |
-| **Token savings** | Same — no framework offers tool search |
-| **Maintenance** | Framework dependency |
-
-**Verdict:** No Node.js MCP framework currently offers tool search. We'd be migrating for organizational benefits (file-per-tool structure) but still need to build search ourselves.
-
-### Option D: Hybrid — Custom Server + Tool Search Layer
-
-**What:** Extract tool definitions into a registry, add a search layer on top, keep the custom server.
+Extract tool registry + handlers from `routes.ts`, add search layer, keep custom JSON-RPC.
 
 | Aspect | Assessment |
 |--------|-----------|
 | **Effort** | Low-Medium (2-3 days) |
 | **Risk** | Low — refactor, not rewrite |
 | **Token savings** | 88-96% |
-| **Maintenance** | Cleaner architecture, tool search included |
+| **Framework benefits** | None (but cleaner code structure) |
+| **Maintenance** | We own everything |
 
-**This is the recommended approach.** Steps:
-1. Extract tool definitions from `routes.ts` into a `toolRegistry.ts`
-2. Extract tool handlers into a `toolHandlers.ts` dispatch map
-3. Add `search_tools` and `call_tool` as a thin layer
-4. Make tool search configurable (opt-in, with `always_visible` list)
+#### Option D: Official SDK + Tool Search + Phased Migration
+
+Start with tool search on our custom server (Option A), then migrate to the SDK incrementally.
+
+| Aspect | Assessment |
+|--------|-----------|
+| **Effort** | 1-2 days now, 2-3 days later |
+| **Risk** | Lowest — get value immediately, migrate when ready |
+| **Token savings** | 88-96% immediately |
+| **Framework benefits** | Deferred but planned |
+
+### Decision Matrix
+
+| Criteria | Weight | Option A (Quick) | Option B (SDK) | Option C (Refactor) | Option D (Phased) |
+|----------|--------|---------|---------|---------|---------|
+| Time to token savings | High | ★★★ | ★★ | ★★★ | ★★★ |
+| Long-term maintainability | High | ★ | ★★★ | ★★ | ★★★ |
+| Protocol correctness | Medium | ★ | ★★★ | ★ | ★★★ |
+| Risk | High | ★★★ | ★★ | ★★★ | ★★★ |
+| Future-proofing | Medium | ★ | ★★★ | ★★ | ★★★ |
+| **Total** | | 9 | 13 | 11 | **15** |
 
 ---
 
 ## 5. Recommendation
 
-### Go with Option D: Hybrid refactor + tool search
+### Go with Option D: Phased — Tool Search Now, SDK Migration Later
 
 **Why:**
-- **Lowest risk** — incremental refactor, not a rewrite
-- **Highest value** — 88-96% token reduction + cleaner architecture
-- **No new dependencies** — no framework lock-in
-- **Future-proof** — registry pattern makes it easy to add more tools, middleware, per-session filtering, etc.
+- **Immediate value** — get 88-96% token savings in 1-2 days
+- **Lowest risk** — additive change, no rewrite
+- **Clear upgrade path** — migrate to official SDK when ready for notifications, annotations, Zod, progress
+- **Best of both worlds** — don't delay token savings waiting for a larger migration
 
 ### Implementation Plan
 
@@ -504,11 +585,17 @@ if (name === 'agor_search_tools') {
 
 ## Appendix: Key References
 
-- **Agor MCP server**: `apps/agor-daemon/src/mcp/routes.ts`
+### Internal
+- **Agor MCP server**: `apps/agor-daemon/src/mcp/routes.ts` (4,300 lines — tool defs + handlers)
 - **MCP token auth**: `apps/agor-daemon/src/mcp/tokens.ts`
-- **FastMCP tool search docs**: https://gofastmcp.com/servers/transforms/tool-search
+- **MCP types**: `packages/core/src/types/mcp.ts`
+
+### External
+- **FastMCP tool search docs** (Python): https://gofastmcp.com/servers/transforms/tool-search
+- **FastMCP TypeScript** (punkpeye): https://github.com/punkpeye/fastmcp
+- **Official MCP TypeScript SDK**: https://github.com/modelcontextprotocol/typescript-sdk
+- **Official SDK server docs**: https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/server.md
 - **MCP protocol spec (tools)**: https://modelcontextprotocol.io/legacy/concepts/tools
 - **MCP dynamic tool discovery**: https://www.speakeasy.com/mcp/tool-design/dynamic-tool-discovery
-- **@modelcontextprotocol/sdk (npm)**: https://www.npmjs.com/package/@modelcontextprotocol/sdk
 - **mcp-framework (npm)**: https://www.npmjs.com/package/mcp-framework
 - **Claude Code list_changed support**: https://github.com/anthropics/claude-code/issues/13646
