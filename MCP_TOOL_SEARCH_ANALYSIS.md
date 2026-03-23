@@ -1,6 +1,22 @@
 # MCP Tool Search Analysis
 
-> Analyzing token costs of Agor's 44 MCP tools and evaluating the FastMCP "tool search" pattern to reduce per-request overhead.
+> Analyzing token costs of Agor's 44 MCP tools and evaluating approaches to reduce per-request context overhead.
+
+---
+
+## 0. TL;DR — Key Discovery
+
+**Anthropic already shipped built-in tool search** (Jan 2026). There are actually **three layers** where tool search can happen:
+
+| Layer | What | Agor Status |
+|-------|------|-------------|
+| **Claude Code (client-side)** | Auto-detects >10K tokens of MCP tools, defers loading, adds `MCPSearch` tool | **Already working** — our 44 tools (~13K tokens) trigger it automatically |
+| **Messages API (`defer_loading`)** | Mark tools with `defer_loading: true` + include `tool_search_tool_regex` or `_bm25` | **Not yet used** — Agor's Agent SDK integration doesn't pass `defer_loading` |
+| **MCP Server (enable/disable)** | SDK's `RegisteredTool.enable()/disable()` + `sendToolListChanged()` | **Not yet implemented** — requires SDK migration |
+
+**Bottom line:** Claude Code sessions already benefit from tool search automatically. The remaining work is:
+1. **Quick win:** Leverage `defer_loading` in the Messages API for non-Claude-Code agents (Codex, Gemini, custom)
+2. **Longer term:** Migrate MCP server to Official SDK for cleaner architecture + server-side control
 
 ---
 
@@ -169,7 +185,95 @@ This means we could implement a hybrid approach: start with search tools, then d
 
 ---
 
-## 4. Framework Landscape
+## 4. Anthropic's Built-In Tool Search (The Game Changer)
+
+### What Shipped
+
+Anthropic rolled out **built-in tool search** in January 2026 at two levels:
+
+#### Level 1: Claude Code Auto-Search (Client-Side)
+
+Claude Code **automatically** enables tool search when MCP tool definitions exceed ~10K tokens:
+
+1. Detects total MCP tool token count > 10K threshold
+2. Marks tools with `defer_loading: true` internally
+3. Injects an `MCPSearch` tool into the agent's tool set
+4. Claude discovers tools on-demand via search, then calls them natively
+5. **No server-side changes needed** — works with any MCP server
+
+**Agor already benefits from this.** Our 44 tools (~13K tokens) exceed the 10K threshold, so Claude Code sessions are already using tool search. Benchmarks show 85%+ token reduction.
+
+#### Level 2: Messages API `defer_loading` (Server-Side)
+
+For direct API usage (not through Claude Code), you can explicitly opt tools into deferred loading:
+
+```typescript
+// In the Messages API tools array:
+{
+  name: "get_weather",
+  description: "Get current weather for a location",
+  input_schema: { ... },
+  defer_loading: true  // ← This tool won't be loaded into context until searched
+}
+```
+
+Plus include a search tool:
+```typescript
+{ type: "tool_search_tool_bm25_20251119", name: "tool_search_tool_bm25" }
+```
+
+The API handles everything — deferred tools don't count against input tokens, search happens server-side at Anthropic, `tool_reference` blocks auto-expand to full definitions.
+
+Two search strategies:
+- **Regex** (`tool_search_tool_regex_20251119`) — Claude constructs regex patterns
+- **BM25** (`tool_search_tool_bm25_20251119`) — Natural language queries, ranked by relevance
+
+#### Level 3: Custom Client-Side Search
+
+You can implement your own search (embeddings, semantic, etc.) by returning `tool_reference` blocks:
+
+```json
+{
+  "type": "tool_result",
+  "tool_use_id": "toolu_xxx",
+  "content": [{ "type": "tool_reference", "tool_name": "discovered_tool_name" }]
+}
+```
+
+Referenced tools must have `defer_loading: true` in the `tools` array. The API auto-expands references into full definitions.
+
+#### MCP-Specific Integration
+
+For MCP servers specifically, there's `mcp_toolset` with bulk defer:
+
+```typescript
+{
+  type: "mcp_toolset",
+  mcp_server_name: "agor",
+  default_config: { defer_loading: true },  // Defer ALL tools by default
+  configs: {
+    agor_sessions_get_current: { defer_loading: false },  // Keep essentials visible
+    agor_sessions_spawn: { defer_loading: false },
+  }
+}
+```
+
+### What This Means for Agor
+
+| Agent Type | Current State | Action Needed |
+|-----------|---------------|---------------|
+| **Claude Code** sessions | Auto tool search already working | None — already saving ~85% tokens |
+| **Claude Agent SDK** sessions | Full tool definitions sent every turn | Pass `defer_loading: true` via SDK options |
+| **Codex / Gemini** sessions | No Anthropic tool search available | Server-side search still valuable |
+
+**The urgency of building our own tool search is lower than initially thought.** Claude Code already handles it. The remaining value is:
+1. Better architecture (SDK migration, split `routes.ts` monolith)
+2. Server-side search for non-Claude agents
+3. Tool annotations, Zod validation, progress notifications
+
+---
+
+## 5. MCP Server Framework Landscape
 
 ### The Three Contenders
 
@@ -262,13 +366,19 @@ This is **better than FastMCP's approach** because:
 
 ---
 
-## 5. Recommendation: Migrate to Official SDK
+## 6. Recommendation: Migrate to Official SDK
 
-### Why the SDK, not a quick patch
+### Why still migrate if Claude Code already has tool search?
 
-The original analysis recommended a phased approach (quick search now, SDK later). After deeper analysis of the SDK's `RegisteredTool` API, **the SDK migration IS the tool search implementation**. The `enable()`/`disable()`/`sendToolListChanged()` primitives are exactly what we need — building this on our custom server would mean reimplementing what the SDK already provides.
+**Tool search is solved at the client layer for Claude Code.** But the SDK migration is still the right move because:
 
-The SDK also gives us a natural decomposition of `routes.ts` (currently 4,300 lines) — each tool becomes a `registerTool()` call with co-located definition + handler, which is the refactoring we wanted anyway.
+1. **Architecture** — `routes.ts` is 4,300 lines of mixed definitions + handlers. The SDK gives us a natural 1-tool-per-`registerTool()` decomposition into 10 focused domain files.
+2. **Non-Claude agents** — Codex, Gemini, and custom agents don't benefit from Claude Code's auto-search. Server-side `enable()/disable()/sendToolListChanged()` serves them.
+3. **Tool annotations** — `readOnlyHint`, `destructiveHint`, `idempotentHint` help ALL agents make safer choices.
+4. **Zod validation** — Catch bad inputs before they hit FeathersJS services.
+5. **Progress notifications** — Environment start, repo clone, etc. can report progress to agents.
+6. **Protocol correctness** — SDK handles JSON-RPC framing, error codes, capability negotiation. We delete ~500 lines of custom protocol code.
+7. **Future-proofing** — SEP-1821 (dynamic tool discovery via `query` param in `tools/list`) is in draft. The SDK will implement it; our custom code won't.
 
 ### Implementation Plan
 
@@ -546,7 +656,7 @@ Add a fallback: if `tool_search: false`, all tools are enabled (current behavior
 
 ---
 
-## 6. Why This Is Better Than FastMCP's Approach
+## 7. Why Our Server-Side Approach Is Better Than FastMCP's
 
 FastMCP (Python) uses a `call_tool` proxy — agents discover tools via search, then call them indirectly through a generic proxy tool. The SDK's `enable()`/`disable()` + `sendToolListChanged()` pattern is strictly better:
 
@@ -570,12 +680,22 @@ The key insight: **discovered tools become first-class tools** in the client. No
 - **MCP token auth**: `apps/agor-daemon/src/mcp/tokens.ts`
 - **MCP types**: `packages/core/src/types/mcp.ts`
 
-### External
+### Anthropic Tool Search (Built-In)
+- **Tool Search Tool docs**: https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
+- **Advanced tool use (engineering blog)**: https://www.anthropic.com/engineering/advanced-tool-use
+- **Code execution with MCP**: https://www.anthropic.com/engineering/code-execution-with-mcp
+- **Claude Code MCP tool search**: https://www.atcyrus.com/stories/mcp-tool-search-claude-code-context-pollution-guide
+
+### MCP Protocol & SDK
+- **Official MCP TypeScript SDK**: https://github.com/modelcontextprotocol/typescript-sdk
+- **SEP-1821: Dynamic Tool Discovery** (draft): https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1821
+- **SEP-1888: Progressive Disclosure** (draft): https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1888
+- **MCP protocol spec (tools)**: https://modelcontextprotocol.io/legacy/concepts/tools
+
+### Third-Party Approaches
 - **FastMCP tool search docs** (Python): https://gofastmcp.com/servers/transforms/tool-search
 - **FastMCP TypeScript** (punkpeye): https://github.com/punkpeye/fastmcp
-- **Official MCP TypeScript SDK**: https://github.com/modelcontextprotocol/typescript-sdk
-- **Official SDK server docs**: https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/server.md
-- **MCP protocol spec (tools)**: https://modelcontextprotocol.io/legacy/concepts/tools
-- **MCP dynamic tool discovery**: https://www.speakeasy.com/mcp/tool-design/dynamic-tool-discovery
-- **mcp-framework (npm)**: https://www.npmjs.com/package/mcp-framework
-- **Claude Code list_changed support**: https://github.com/anthropics/claude-code/issues/13646
+- **Speakeasy dynamic toolsets** (100x reduction): https://www.speakeasy.com/blog/how-we-reduced-token-usage-by-100x-dynamic-toolsets-v2
+- **mcp2cli** (96-99% reduction): https://jangwook.net/en/blog/en/mcp2cli-token-cost-optimization/
+- **ToolHive MCP Optimizer**: https://dev.to/stacklok/cut-token-waste-from-your-ai-workflow-with-the-toolhive-mcp-optimizer-3oo6
+- **Redis tool filtering** (98% reduction): https://redis.io/blog/from-reasoning-to-retrieval-solving-the-mcp-tool-overload-problem/
