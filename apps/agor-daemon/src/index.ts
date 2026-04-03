@@ -2853,7 +2853,28 @@ async function main() {
       ],
     },
     after: {
-      create: [gatewayRouteHook],
+      create: [
+        gatewayRouteHook,
+        // Increment session message_count - ensures fork_point_message_index is accurate
+        async (context: HookContext) => {
+          const sessionsService = app.service('sessions') as unknown as SessionsServiceImpl;
+          const message = context.result as Message;
+
+          try {
+            const session = await sessionsService.get(message.session_id);
+            await sessionsService.patch(message.session_id, {
+              message_count: (session.message_count || 0) + 1,
+            });
+          } catch (error) {
+            console.error(
+              `⚠️  Failed to increment message_count for session ${message.session_id.substring(0, 8)}:`,
+              error
+            );
+          }
+
+          return context;
+        },
+      ],
       patch: [
         async (context: HookContext<Board>) => {
           // Detect permission resolution and notify executor via IPC
