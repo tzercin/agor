@@ -34,6 +34,7 @@ import { getSessionDisplayTitle, getSessionTitleStyles } from '../../utils/sessi
 import { compileTemplate } from '../../utils/templates';
 import { AutocompleteTextarea } from '../AutocompleteTextarea';
 import { FileUpload, FileUploadButton } from '../FileUpload';
+import { ForkSpawnModal } from '../ForkSpawnModal';
 import { MCPServerPill } from '../MCPServerPill';
 import { CreatedByTag } from '../metadata';
 import { PermissionModeSelector } from '../PermissionModeSelector';
@@ -191,6 +192,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const [scrollToBottom, setScrollToBottom] = React.useState<(() => void) | null>(null);
   const [scrollToTop, setScrollToTop] = React.useState<(() => void) | null>(null);
   const [queuedMessages, setQueuedMessages] = React.useState<Message[]>([]);
+  const [forkModalOpen, setForkModalOpen] = React.useState(false);
   const [spawnModalOpen, setSpawnModalOpen] = React.useState(false);
   const [uploadModalOpen, setUploadModalOpen] = React.useState(false);
   const [droppedFiles, setDroppedFiles] = React.useState<File[]>([]);
@@ -432,9 +434,15 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
 
   const handleFork = () => {
     if (!session) return;
-    onFork?.(session.session_id, inputValue.trim());
-    setInputValue('');
-    deleteDraft(session.session_id);
+    setForkModalOpen(true);
+  };
+
+  const handleForkModalConfirm = async (promptOrConfig: string | Partial<SpawnConfig>) => {
+    if (!session) return;
+    // Fork always receives a string prompt (not a config object)
+    const prompt = typeof promptOrConfig === 'string' ? promptOrConfig : promptOrConfig.prompt || '';
+    await onFork?.(session.session_id, prompt);
+    setForkModalOpen(false);
   };
 
   const handleSpawnModalConfirm = async (config: string | Partial<SpawnConfig>) => {
@@ -933,6 +941,20 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             }}
           />
         )}
+
+        {/* Fork session modal */}
+        <ForkSpawnModal
+          open={forkModalOpen}
+          action="fork"
+          session={session}
+          currentUser={currentUser}
+          mcpServerById={mcpServerById}
+          initialPrompt={inputValue}
+          onConfirm={handleForkModalConfirm}
+          onCancel={() => setForkModalOpen(false)}
+          client={client}
+          userById={userById}
+        />
       </div>
     </div>
   );
