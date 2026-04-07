@@ -96,7 +96,11 @@ export function useSessionActions(client: AgorClient | null): UseSessionActionsR
     }
   };
 
-  const forkSession = async (sessionId: SessionID, prompt: string, title?: string): Promise<Session | null> => {
+  const forkSession = async (
+    sessionId: SessionID,
+    prompt: string,
+    title?: string
+  ): Promise<Session | null> => {
     if (!client) {
       setError('Client not connected');
       return null;

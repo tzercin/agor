@@ -439,9 +439,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
 
   const handleForkModalConfirm = async (promptOrConfig: string | Partial<SpawnConfig>) => {
     if (!session) return;
-    const prompt = typeof promptOrConfig === 'string' ? promptOrConfig : promptOrConfig.prompt || '';
-    const title =
-      typeof promptOrConfig === 'object' ? promptOrConfig.title : undefined;
+    const prompt =
+      typeof promptOrConfig === 'string' ? promptOrConfig : promptOrConfig.prompt || '';
+    const title = typeof promptOrConfig === 'object' ? promptOrConfig.title : undefined;
     await onFork?.(session.session_id, prompt, title);
     setForkModalOpen(false);
   };

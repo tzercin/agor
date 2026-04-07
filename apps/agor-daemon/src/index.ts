@@ -4938,7 +4938,10 @@ async function main() {
     app,
     '/sessions/:id/fork',
     {
-      async create(data: { prompt: string; task_id?: string; title?: string }, params: RouteParams) {
+      async create(
+        data: { prompt: string; task_id?: string; title?: string },
+        params: RouteParams
+      ) {
         const id = params.route?.id;
         if (!id) throw new Error('Session ID required');
         console.log(`🔀 Forking session: ${id.substring(0, 8)}`);
