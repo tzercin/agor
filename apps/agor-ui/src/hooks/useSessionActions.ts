@@ -22,7 +22,7 @@ interface UseSessionActionsResult {
   deleteSession: (sessionId: SessionID) => Promise<boolean>;
   archiveSession: (sessionId: SessionID) => Promise<Session | null>;
   unarchiveSession: (sessionId: SessionID) => Promise<Session | null>;
-  forkSession: (sessionId: SessionID, prompt: string) => Promise<Session | null>;
+  forkSession: (sessionId: SessionID, prompt: string, title?: string) => Promise<Session | null>;
   spawnSession: (sessionId: SessionID, config: Partial<SpawnConfig>) => Promise<Session | null>;
   creating: boolean;
   error: string | null;
@@ -96,7 +96,7 @@ export function useSessionActions(client: AgorClient | null): UseSessionActionsR
     }
   };
 
-  const forkSession = async (sessionId: SessionID, prompt: string): Promise<Session | null> => {
+  const forkSession = async (sessionId: SessionID, prompt: string, title?: string): Promise<Session | null> => {
     if (!client) {
       setError('Client not connected');
       return null;
@@ -109,6 +109,7 @@ export function useSessionActions(client: AgorClient | null): UseSessionActionsR
       // Call custom fork endpoint via FeathersJS client
       const forkedSession = (await client.service(`sessions/${sessionId}/fork`).create({
         prompt,
+        ...(title ? { title } : {}),
       })) as Session;
 
       // Send the prompt to the forked session to actually execute it

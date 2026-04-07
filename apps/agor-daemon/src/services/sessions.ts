@@ -167,7 +167,7 @@ export class SessionsService extends DrizzleService<Session, Partial<Session>, S
    */
   async fork(
     id: string,
-    data: { prompt: string; task_id?: string },
+    data: { prompt: string; task_id?: string; title?: string },
     params?: SessionParams
   ): Promise<Session> {
     const parent = await this.get(id, params);
@@ -176,7 +176,7 @@ export class SessionsService extends DrizzleService<Session, Partial<Session>, S
       {
         agentic_tool: parent.agentic_tool,
         status: SessionStatus.IDLE,
-        title: data.prompt.substring(0, 100), // First 100 chars as title
+        title: data.title || data.prompt.substring(0, 100), // Use explicit title or first 100 chars of prompt
         description: data.prompt,
         worktree_id: parent.worktree_id,
         created_by: parent.created_by, // Inherit parent's creator for proper attribution

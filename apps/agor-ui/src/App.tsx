@@ -659,8 +659,8 @@ function AppContent() {
   };
 
   // Handle fork session
-  const handleForkSession = async (sessionId: string, prompt: string) => {
-    const session = await forkSession(sessionId as SessionID, prompt);
+  const handleForkSession = async (sessionId: string, prompt: string, title?: string) => {
+    const session = await forkSession(sessionId as SessionID, prompt, title);
     if (session) {
       showSuccess('Session forked successfully!');
       // Clear the draft after forking

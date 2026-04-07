@@ -12,7 +12,7 @@ import type { WorktreeModalTab } from '../components/WorktreeModal/WorktreeModal
 export interface AppActionsContextValue {
   // Session actions
   onSendPrompt?: (sessionId: string, prompt: string, permissionMode?: PermissionMode) => void;
-  onFork?: (sessionId: string, prompt: string) => Promise<void>;
+  onFork?: (sessionId: string, prompt: string, title?: string) => Promise<void>;
   onSubsession?: (sessionId: string, config: string | Partial<SpawnConfig>) => Promise<void>;
   onUpdateSession?: (sessionId: string, updates: Partial<Session>) => void;
   onDeleteSession?: (sessionId: string) => void;

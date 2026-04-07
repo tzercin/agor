@@ -9,7 +9,7 @@ import type { AgorClient } from '@agor/core/api';
 import type { AgenticToolName, MCPServer, Session, SpawnConfig, User } from '@agor/core/types';
 import { getDefaultPermissionMode } from '@agor/core/types';
 import { DownOutlined } from '@ant-design/icons';
-import { Checkbox, Collapse, Form, Modal, Radio, Typography } from 'antd';
+import { Checkbox, Collapse, Form, Input, Modal, Radio, Typography } from 'antd';
 import { useEffect, useState } from 'react';
 import { AgenticToolConfigForm } from '../AgenticToolConfigForm';
 import { AgentSelectionGrid } from '../AgentSelectionGrid/AgentSelectionGrid';
@@ -96,7 +96,8 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
       setLoading(true);
 
       if (action === 'fork') {
-        await onConfirm(prompt);
+        const title = values.title?.trim();
+        await onConfirm({ prompt, title: title || undefined });
       } else {
         // Build spawn config based on preset
         const spawnConfig: Partial<SpawnConfig> = { prompt };
@@ -144,7 +145,7 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
   const actionLabel = action === 'fork' ? 'Fork' : 'Spawn';
   const actionDescription =
     action === 'fork'
-      ? 'Create a sibling session to explore an alternative approach'
+      ? 'Create a forked session to explore an alternative approach'
       : 'Create a child session to work on a focused subsession';
 
   return (
@@ -171,6 +172,17 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
       </div>
 
       <Form form={form} layout="vertical">
+        {/* Title (fork only) */}
+        {action === 'fork' && (
+          <Form.Item
+            name="title"
+            label="Title"
+            rules={[{ required: true, message: 'Please enter a title' }]}
+          >
+            <Input placeholder="e.g., Try alternative authentication approach" />
+          </Form.Item>
+        )}
+
         {/* Prompt */}
         <Form.Item
           name="prompt"
