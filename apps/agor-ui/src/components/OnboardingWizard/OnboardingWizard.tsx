@@ -69,11 +69,16 @@ const { useToken } = theme;
 
 const CLONE_TIMEOUT_MS = 120_000;
 
-const ASSISTANT_BOOT_PROMPT = `You are starting your first session as an Agor assistant.
-
-Read the framework files in this worktree. Then introduce yourself — show that you understand your role as a persistent, memory-aware assistant, not a generic chatbot. Keep your intro brief and warm.
-
-Context: this is a fresh Agor installation, assistant path, first session.`;
+// Minimal kickoff: context only, no role-instructions. The framework owns
+// "who you are / what to do" — putting that in the prompt makes the agent
+// perform an intro for the prompt rather than internalize the framework.
+//
+// BOOTSTRAP.md is the dedicated first-run ritual in the agor-assistant
+// framework: explicit about "ship something useful fast, don't ceremonialize"
+// and self-deletes after. BOOT.md (every-session ritual) just redirects to
+// BOOTSTRAP.md on first run anyway — pointing there saves one indirection
+// and surfaces the first-run-specific tone-setting.
+const ASSISTANT_BOOT_PROMPT = `Fresh Agor worktree, first session. Start with BOOTSTRAP.md.`;
 
 // ─── Types ──────────────────────────────────────────────
 
@@ -122,11 +127,6 @@ export interface OnboardingWizardProps {
   // Config from health endpoint
   assistantPending?: boolean;
   frameworkRepoUrl?: string;
-  systemCredentials?: {
-    ANTHROPIC_API_KEY?: boolean;
-    OPENAI_API_KEY?: boolean;
-    GEMINI_API_KEY?: boolean;
-  };
 }
 
 // ─── Helpers ────────────────────────────────────────────
@@ -270,7 +270,6 @@ export function OnboardingWizard({
   onCheckAuth,
   assistantPending,
   frameworkRepoUrl,
-  systemCredentials,
 }: OnboardingWizardProps) {
   const { token } = useToken();
 
@@ -306,11 +305,13 @@ export function OnboardingWizard({
   const [apiKey, setApiKey] = useState('');
   const [selectedAgent, setSelectedAgent] = useState<AgenticToolName>('claude-code');
   const [testAuthLoading, setTestAuthLoading] = useState(false);
-  const [testAuthResult, setTestAuthResult] = useState<AuthCheckResult | null>(null);
-  // Lets the user opt out of detected auth (CLI/OAuth/file-probe) and paste
-  // a key manually — useful when the detected method isn't what they want
-  // (e.g. ChatGPT OAuth detected but they prefer a work API key) or when
-  // our probe is wrong. Resets on agent change and on wizard reset.
+  // Inline feedback from the user clicking "Test Connection" on a typed key.
+  // Never flips the panel, never advances, never saves. Wiped on agent
+  // change and on key edit (stale).
+  const [manualTestResult, setManualTestResult] = useState<AuthCheckResult | null>(null);
+  // Lets the user opt out of an already-stored per-user credential and paste
+  // a different key — useful when the stored key is wrong-account or stale.
+  // Resets on agent change and on wizard reset.
   const [overrideDetectedAuth, setOverrideDetectedAuth] = useState(false);
 
   // Created resource IDs
@@ -327,9 +328,6 @@ export function OnboardingWizard({
   // The failure watcher ignores these so a stale row from a prior attempt never
   // immediately cancels a new retry before the daemon has a chance to replace it.
   const knownFailedRepoIdsRef = useRef<Set<string>>(new Set());
-  // Tracks which agent we've already auto-tested on the current api-keys
-  // visit, so re-rendering the step doesn't re-fire the test endlessly.
-  const autoTestedAgentRef = useRef<string | null>(null);
 
   // ─── Derived ──────────────────────────────────────
   const steps = useMemo(() => getStepsForPath(path), [path]);
@@ -340,7 +338,17 @@ export function OnboardingWizard({
   // Claude Code accepts either an Anthropic API key or a Pro/Max subscription
   // OAuth token (from `claude setup-token`). Either is a valid credential.
   // Per-tool credentials live under `agentic_tools[tool][envVarName]` (boolean
-  // presence flags on the public DTO).
+  // presence flags on the public DTO). `env_vars` is also per-user (lives on
+  // the User record).
+  //
+  // Intentionally PER-USER only — we don't consider host-level fallbacks
+  // (config.yaml `credentials.*` or daemon process env vars) when deciding
+  // whether to skip the LLM-auth onboarding step. Sessions still fall back
+  // to host-level creds at run time, but treating them as "this user is
+  // already authenticated" auto-skipped onboarding for brand-new users (they
+  // silently inherited the admin's setup with no chance to configure their
+  // own). Users who want the host fallback can click "Continue without key"
+  // in the form.
   const claudeFields = user?.agentic_tools?.['claude-code'];
   const codexFields = user?.agentic_tools?.codex;
   const geminiFields = user?.agentic_tools?.gemini;
@@ -348,24 +356,12 @@ export function OnboardingWizard({
   const hasAnthropicKey = !!(
     claudeFields?.ANTHROPIC_API_KEY ||
     claudeFields?.CLAUDE_CODE_OAUTH_TOKEN ||
-    user?.env_vars?.ANTHROPIC_API_KEY ||
-    systemCredentials?.ANTHROPIC_API_KEY
+    user?.env_vars?.ANTHROPIC_API_KEY
   );
-  const hasOpenAIKey = !!(
-    codexFields?.OPENAI_API_KEY ||
-    user?.env_vars?.OPENAI_API_KEY ||
-    systemCredentials?.OPENAI_API_KEY
-  );
-  const hasGeminiKey = !!(
-    geminiFields?.GEMINI_API_KEY ||
-    user?.env_vars?.GEMINI_API_KEY ||
-    systemCredentials?.GEMINI_API_KEY
-  );
-
+  const hasOpenAIKey = !!(codexFields?.OPENAI_API_KEY || user?.env_vars?.OPENAI_API_KEY);
+  const hasGeminiKey = !!(geminiFields?.GEMINI_API_KEY || user?.env_vars?.GEMINI_API_KEY);
   const hasCopilotToken = !!(
-    copilotFields?.COPILOT_GITHUB_TOKEN ||
-    user?.env_vars?.COPILOT_GITHUB_TOKEN ||
-    (systemCredentials as Record<string, unknown>)?.COPILOT_GITHUB_TOKEN
+    copilotFields?.COPILOT_GITHUB_TOKEN || user?.env_vars?.COPILOT_GITHUB_TOKEN
   );
 
   const hasKeyForAgent = (agent: AgenticToolName): boolean => {
@@ -386,9 +382,22 @@ export function OnboardingWizard({
   };
 
   // ─── Resume from prior onboarding state ──────────
+  //
+  // ONE-SHOT: this effect runs exactly once per wizard mount, before any
+  // user interaction. The wizard's own `saveOnboardingProgress` writes the
+  // user-selected path back to `user.preferences.onboarding.path`, which
+  // would otherwise cause this effect to re-fire AFTER the user picks a
+  // path — making a fresh-flow user look like a returning-resumption user
+  // and triggering bogus step jumps (e.g. the assistant-path branch picks
+  // up the SHARED framework repo and skips to "board", silently bypassing
+  // api-keys and clone). resumedRef.current is set unconditionally at the
+  // end so subsequent re-renders are no-ops. Wizard remount on user
+  // change (key={currentUser.user_id} in App.tsx) gives each user a fresh
+  // shot at the resume decision.
   const resumedRef = useRef(false);
   useEffect(() => {
     if (!open || resumedRef.current || !user) return;
+    resumedRef.current = true;
 
     const onboarding = user.preferences?.onboarding;
     const mainBoardId = user.preferences?.mainBoardId;
@@ -401,55 +410,77 @@ export function OnboardingWizard({
       return;
     }
 
-    // We have prior onboarding state — resume from where user left off
-    resumedRef.current = true;
+    // Resource-ownership validation. The resume-step decisions below jump the
+    // wizard past the api-keys / board / repo creation steps based on IDs
+    // stored in user.preferences. If those IDs ever point at resources NOT
+    // created by the current user — whether through a leak, a stale prefs
+    // copy, or an admin viewing a shared resource — the wizard would
+    // wrongly skip steps for a user who hasn't actually completed them.
+    // Only treat the resume IDs as valid when (a) the resource is loaded
+    // AND (b) the current user is its creator. Anything that fails this
+    // check is treated as if the preference were unset; the fallback chain
+    // then routes the user to the right step (typically api-keys).
+    const validWorktreeId =
+      onboarding.worktreeId && worktreeById.get(onboarding.worktreeId)?.created_by === user.user_id
+        ? onboarding.worktreeId
+        : undefined;
+    const validBoardId =
+      mainBoardId && boardById.get(mainBoardId)?.created_by === user.user_id
+        ? mainBoardId
+        : undefined;
+    // Repos are SHARED resources (no created_by attribution). We require a
+    // saved repoId in the user's own preferences as proof that this user
+    // intentionally adopted this repo — we deliberately do NOT pick up
+    // matching repos from the map otherwise (e.g. via findReadyFrameworkRepo)
+    // as that would let a new user inherit any framework repo cloned by a
+    // prior user and skip the clone step.
+    const validRepoId =
+      onboarding.repoId && repoById.has(onboarding.repoId) ? onboarding.repoId : undefined;
+
+    if (
+      onboarding.worktreeId !== validWorktreeId ||
+      mainBoardId !== validBoardId ||
+      onboarding.repoId !== validRepoId
+    ) {
+      console.warn('[OnboardingWizard] Dropping resume references not owned by current user', {
+        user_id: user.user_id,
+        claimed: { worktreeId: onboarding.worktreeId, mainBoardId, repoId: onboarding.repoId },
+        valid: { worktreeId: validWorktreeId, boardId: validBoardId, repoId: validRepoId },
+      });
+    }
+
     // Map legacy 'persisted-agent' to 'assistant'
     const resumedPath: WizardPath =
       onboarding.path === 'persisted-agent' ? 'assistant' : (onboarding.path as WizardPath);
     setPath(resumedPath);
 
-    // Restore created resource IDs
-    if (mainBoardId) {
-      setCreatedBoardId(mainBoardId);
-    } else if (onboarding.boardId) {
-      setCreatedBoardId(onboarding.boardId);
+    // Restore created resource IDs (only the validated ones)
+    if (validBoardId) {
+      setCreatedBoardId(validBoardId);
     }
 
     // Restore repoId so the worktree step doesn't fail "Missing repo or board"
-    // on resume. The safety-net effect can re-derive it for the assistant path
-    // (framework slug) but has no signal for an own-repo resume because
-    // `repoUrl`/`localRepoPath` are local state and reset to ''.
-    if (onboarding.repoId && repoById.has(onboarding.repoId)) {
-      setCreatedRepoId(onboarding.repoId);
+    // on resume.
+    if (validRepoId) {
+      setCreatedRepoId(validRepoId);
     }
 
-    if (onboarding.worktreeId) {
-      setCreatedWorktreeId(onboarding.worktreeId);
+    if (validWorktreeId) {
+      setCreatedWorktreeId(validWorktreeId);
     }
 
     // Figure out which step to resume from
-    if (onboarding.worktreeId && worktreeById.has(onboarding.worktreeId)) {
-      // Worktree exists — go to launch (api-keys now comes before clone/add-repo)
+    if (validWorktreeId) {
+      // Worktree exists AND is owned by current user — go to launch
       setCurrentStep('launch');
-    } else if (mainBoardId && boardById.has(mainBoardId)) {
-      // Board exists — go to worktree creation
+    } else if (validBoardId) {
+      // Board exists AND is owned by current user — go to worktree creation
       setCurrentStep('worktree');
-    } else if (onboarding.repoId && repoById.has(onboarding.repoId)) {
+    } else if (validRepoId) {
       // Repo is registered (already restored above) — go straight to board
       setCurrentStep('board');
-    } else if (resumedPath === 'assistant') {
-      // Assistant path may have a framework repo cloned outside this wizard
-      // (or under a prior onboarding without persisted repoId). Try to find it.
-      const found = findReadyFrameworkRepo(repoById);
-      if (found) {
-        setCreatedRepoId(found[0]);
-        setCurrentStep('board');
-      } else {
-        // Nothing created yet — restart from api-keys (first real step in new flow)
-        setCurrentStep('api-keys');
-      }
     } else {
-      // own-repo with nothing created — restart from api-keys
+      // Nothing the user actually created yet — restart from api-keys
       setCurrentStep('api-keys');
     }
   }, [
@@ -704,20 +735,23 @@ export function OnboardingWizard({
       // Persist chosen path immediately
       saveOnboardingProgress({ path: selectedPath });
 
-      // API keys is now the first step for both paths.
-      // Check if framework repo already exists (assistant) — if so, skip ahead.
-      if (selectedPath === 'assistant') {
-        const found = findReadyFrameworkRepo(repoById);
-        if (found) {
-          setCreatedRepoId(found[0]);
-          setCurrentStep('board');
-          return;
-        }
-      }
-
+      // Always advance to api-keys after path selection.
+      //
+      // Previously the assistant branch did `findReadyFrameworkRepo(repoById)`
+      // and skipped to "board" if any framework repo was found anywhere in
+      // the daemon. The framework repo is a SHARED resource (no per-user
+      // attribution), so as soon as one admin or earlier user had cloned it,
+      // every subsequent user picking the assistant path would silently
+      // bypass the api-keys + clone steps and land on board creation. That
+      // matches the reported bug: brand-new user picks "Assistant", wizard
+      // skips past LLM auth and clone, lands at board / worktree creation.
+      //
+      // The assistant clone step is now reached via the api-keys path like
+      // every other tool; handleStartClone deduplicates against the shared
+      // framework repo at the daemon level (so re-cloning is a no-op).
       setCurrentStep('api-keys');
     },
-    [repoById, saveOnboardingProgress, setCurrentStep]
+    [saveOnboardingProgress, setCurrentStep]
   );
 
   const handleStartClone = useCallback(async () => {
@@ -818,9 +852,12 @@ export function OnboardingWizard({
   ]);
 
   const handleCreateBoard = useCallback(async () => {
-    // If we already have a board from a prior run, skip creation
+    // If we already have a board from a prior run, skip creation —
+    // but only if it's actually OWNED by the current user. A leaked
+    // mainBoardId pointing at someone else's board must not let us
+    // short-circuit the create step.
     const existingBoardId = user?.preferences?.mainBoardId;
-    if (existingBoardId && boardById.has(existingBoardId)) {
+    if (existingBoardId && user && boardById.get(existingBoardId)?.created_by === user.user_id) {
       setCreatedBoardId(existingBoardId);
       setLoading(false);
       setCurrentStep('worktree');
@@ -954,10 +991,10 @@ export function OnboardingWizard({
   const handleTestAuth = useCallback(async () => {
     if (!onCheckAuth) return;
     setTestAuthLoading(true);
-    setTestAuthResult(null);
+    setManualTestResult(null);
     const result = await onCheckAuth(selectedAgent, apiKey.trim() || undefined);
     setTestAuthLoading(false);
-    setTestAuthResult(result);
+    setManualTestResult(result);
   }, [onCheckAuth, selectedAgent, apiKey]);
 
   const handleLaunch = useCallback(async () => {
@@ -1036,7 +1073,7 @@ export function OnboardingWizard({
     setApiKey('');
     setSelectedAgent('claude-code');
     setTestAuthLoading(false);
-    setTestAuthResult(null);
+    setManualTestResult(null);
     setOverrideDetectedAuth(false);
     setCreatedRepoId(null);
     setCreatedBoardId(null);
@@ -1044,7 +1081,6 @@ export function OnboardingWizard({
     setCloneElapsedSeconds(0);
     resumedRef.current = false;
     branchNameInitRef.current = false;
-    autoTestedAgentRef.current = null;
     knownFailedRepoIdsRef.current = new Set();
 
     if (user) {
@@ -1255,7 +1291,7 @@ export function OnboardingWizard({
         <>
           <Alert
             type="error"
-            title="Clone failed"
+            message="Clone failed"
             description={error}
             showIcon
             style={{ marginBottom: 16, textAlign: 'left' }}
@@ -1297,7 +1333,7 @@ export function OnboardingWizard({
         <>
           <Alert
             type="error"
-            title={error}
+            message={error}
             showIcon
             style={{ marginBottom: 16, textAlign: 'left' }}
           />
@@ -1359,7 +1395,7 @@ export function OnboardingWizard({
           </Form.Item>
         </Form>
 
-        {error && <Alert type="error" title={error} showIcon style={{ marginBottom: 16 }} />}
+        {error && <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} />}
 
         <Button
           type="primary"
@@ -1378,97 +1414,43 @@ export function OnboardingWizard({
     // "Already auth'd" covers both stored credentials (agentic_tools / env vars
     // / system credentials) AND ambient CLI auth detected by onCheckAuth —
     // e.g. the user already ran `claude auth login` outside the wizard.
-    const isAuthenticated = hasKey || !!testAuthResult?.authenticated;
-
-    // Surfaces Agor's relaxed permission defaults so users see what they're
-    // agreeing to during onboarding instead of discovering it via behavior.
-    // Defense-in-depth comes from the worktree sandbox + (optional) Unix
-    // impersonation, not from per-call prompts in an MCP-heavy session.
-    const renderSecurityDefaultsNote = (tool: 'claude-code' | 'codex') => {
-      const sandboxLink = (
-        <Typography.Link
-          href="https://agor.live/guide/multiplayer-unix-isolation"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Agor's worktree sandbox
-        </Typography.Link>
-      );
-      const description =
-        tool === 'claude-code' ? (
-          <span>
-            New sessions run in <Text strong>bypassPermissions</Text> mode — Claude won't prompt for
-            each file edit or tool call. Safety comes from {sandboxLink}; you can tighten per
-            session in <Text strong>Session Settings</Text>.
-          </span>
-        ) : (
-          <span>
-            New sessions run as <Text strong>workspace-write</Text> + approval{' '}
-            <Text strong>never</Text> with network access on — Codex won't prompt for each action.
-            Safety comes from {sandboxLink}; you can tighten per session in{' '}
-            <Text strong>Session Settings</Text>.
-          </span>
-        );
-      return (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16, textAlign: 'left' }}
-          message="Permission defaults"
-          description={description}
-        />
-      );
-    };
+    // Auto-flip to "{tool} is configured → Continue" ONLY when the current
+    // user has THEIR OWN stored per-user credential. We intentionally do not
+    // gate on `detectedAuth?.authenticated` here: the ambient probe reads
+    // host-level state (daemon env vars, daemon's ~/.claude or ~/.codex), and
+    // letting it auto-skip the LLM-auth step caused brand-new users to never
+    // see the API-key input — they silently inherited the admin's setup. The
+    // "Test Connection" button writes to manualTestResult (inline ✓/✗) and
+    // is also intentionally absent here so a typed-key test never replaces
+    // the Save step.
+    const isAuthenticated = hasKey;
 
     const renderAuthHint = () => {
       if (selectedAgent === 'claude-code') {
+        // No "Permission defaults" note: Claude defaults to `acceptEdits`,
+        // which IS the SDK's recommended mode (auto-accept edits, prompt for
+        // Bash/MCP). Users can flip to bypass per-session in Session Settings.
         return (
-          <>
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 16, textAlign: 'left' }}
-              description={
-                <span>
-                  You have three ways to authenticate Claude Code: paste an{' '}
-                  <Text code style={{ fontSize: 12 }}>
-                    ANTHROPIC_API_KEY
-                  </Text>{' '}
-                  below, run{' '}
-                  <Text code style={{ fontSize: 12 }}>
-                    claude auth login
-                  </Text>{' '}
-                  in the terminal Agor runs as, or set up a Pro/Max session token from{' '}
-                  <Text strong>User Settings → Claude Code</Text> (best for Claude subscribers).
-                </span>
-              }
-            />
-            {renderSecurityDefaultsNote('claude-code')}
-          </>
+          <Paragraph type="secondary" style={{ marginBottom: 16 }}>
+            Paste an <Text code>ANTHROPIC_API_KEY</Text>, run <Text code>claude auth login</Text>,
+            or set up a Pro/Max token in <Text strong>User Settings → Claude Code</Text>.
+          </Paragraph>
         );
       }
       if (selectedAgent === 'codex') {
+        // Single-line surfacing of the non-obvious Codex default: auto-approve
+        // is wired through Codex's per-server MCP approval mode + workspace-write
+        // sandbox. Worth a one-liner so it's not a surprise.
         return (
           <>
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 16, textAlign: 'left' }}
-              description={
-                <span>
-                  Paste an{' '}
-                  <Text code style={{ fontSize: 12 }}>
-                    OPENAI_API_KEY
-                  </Text>{' '}
-                  below, or authenticate via{' '}
-                  <Text code style={{ fontSize: 12 }}>
-                    codex
-                  </Text>{' '}
-                  in the terminal Agor runs as.
-                </span>
-              }
-            />
-            {renderSecurityDefaultsNote('codex')}
+            <Paragraph type="secondary" style={{ marginBottom: 8 }}>
+              Paste an <Text code>OPENAI_API_KEY</Text>, or run <Text code>codex login</Text> in
+              Agor's terminal.
+            </Paragraph>
+            <Paragraph type="secondary" style={{ marginBottom: 16, fontSize: 12 }}>
+              Defaults: auto-approves tool calls inside the worktree sandbox. Tighten in{' '}
+              <Text strong>Session Settings</Text>.
+            </Paragraph>
           </>
         );
       }
@@ -1502,7 +1484,7 @@ export function OnboardingWizard({
                 setSelectedAgent(value);
                 setApiKey('');
                 setError(null);
-                setTestAuthResult(null);
+                setManualTestResult(null);
                 setOverrideDetectedAuth(false);
               }}
               options={[
@@ -1517,34 +1499,21 @@ export function OnboardingWizard({
           </Form.Item>
         </Form>
 
-        {testAuthLoading && !testAuthResult ? (
-          <div style={{ textAlign: 'center', padding: '24px 0' }}>
-            <Spin />
-            <Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-              Checking authentication…
-            </Paragraph>
-          </div>
-        ) : isAuthenticated && !overrideDetectedAuth ? (
+        {isAuthenticated && !overrideDetectedAuth ? (
           <div style={{ textAlign: 'center', padding: '8px 0' }}>
             <Result
               style={{ padding: '16px 0' }}
               icon={<CheckCircleOutlined style={{ color: token.colorSuccess }} />}
-              title={
-                hasKey
-                  ? `${AGENT_LABELS[selectedAgent]} is configured`
-                  : `Already authenticated${testAuthResult?.method ? ` (${testAuthResult.method})` : ''}`
-              }
-              subTitle={
-                testAuthResult?.hint || `You're all set to use ${AGENT_LABELS[selectedAgent]}.`
-              }
+              title={`${AGENT_LABELS[selectedAgent]} is configured`}
+              subTitle={`You're all set to use ${AGENT_LABELS[selectedAgent]}.`}
             />
             <Space direction="vertical" size="small">
               <Button type="primary" onClick={handleAdvanceFromApiKeys}>
                 Continue
               </Button>
-              {/* Escape hatch: detected auth may be stale, wrong-account, or
-                  just not what the user wants (e.g. ChatGPT OAuth detected
-                  but they prefer a work API key). */}
+              {/* Escape hatch: stored key may be stale, wrong-account, or
+                  just not what the user wants (e.g. work account on file but
+                  they want to use a personal key for this onboarding). */}
               <Button type="link" onClick={() => setOverrideDetectedAuth(true)}>
                 Use a different API key instead
               </Button>
@@ -1580,22 +1549,35 @@ export function OnboardingWizard({
                 <Input.Password
                   placeholder={apiKeyPlaceholder(selectedAgent)}
                   value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
+                  onChange={(e) => {
+                    setApiKey(e.target.value);
+                    // Editing the key invalidates any prior test result.
+                    setManualTestResult(null);
+                  }}
                 />
               </Form.Item>
             </Form>
 
-            {error && <Alert type="error" title={error} showIcon style={{ marginBottom: 16 }} />}
+            {error && <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} />}
 
-            {testAuthResult && !testAuthResult.authenticated && (
-              <Alert
-                type="warning"
-                showIcon
-                style={{ marginBottom: 16, textAlign: 'left' }}
-                title="Not authenticated"
-                description={testAuthResult.hint}
-              />
-            )}
+            {manualTestResult &&
+              (manualTestResult.authenticated ? (
+                <Alert
+                  type="success"
+                  showIcon
+                  style={{ marginBottom: 16, textAlign: 'left' }}
+                  message="Connection works"
+                  description={manualTestResult.hint || 'Click Save & Continue to store this key.'}
+                />
+              ) : (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 16, textAlign: 'left' }}
+                  message="Not authenticated"
+                  description={manualTestResult.hint}
+                />
+              ))}
 
             <Space wrap>
               <Button
@@ -1616,15 +1598,6 @@ export function OnboardingWizard({
                 Continue without key
               </Button>
             </Space>
-            <div style={{ marginTop: 12 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Keys are saved to{' '}
-                <Text strong style={{ fontSize: 12 }}>
-                  User Settings → Agent Setup
-                </Text>{' '}
-                — you can update them any time.
-              </Text>
-            </div>
           </>
         )}
       </div>
@@ -1643,7 +1616,7 @@ export function OnboardingWizard({
       {error && (
         <Alert
           type="error"
-          title={error}
+          message={error}
           showIcon
           style={{ marginBottom: 16, textAlign: 'left' }}
         />
@@ -1750,30 +1723,6 @@ export function OnboardingWizard({
       handleCreateBoard();
     }
   }, [currentStep, loading, error, createdBoardId, handleCreateBoard]);
-
-  // Reset auto-test tracker when leaving the api-keys step so the next
-  // visit can re-test (e.g. after the user installs a CLI auth elsewhere).
-  useEffect(() => {
-    if (currentStep !== 'api-keys') {
-      autoTestedAgentRef.current = null;
-    }
-  }, [currentStep]);
-
-  // Auto-run a connection test when the user lands on api-keys (or switches
-  // agents on it). This catches the common case where they've already auth'd
-  // the agent CLI (e.g. `claude auth login`) — surfaces a Continue button
-  // instead of asking for a key they don't need.
-  useEffect(() => {
-    if (currentStep !== 'api-keys' || !onCheckAuth) return;
-    if (autoTestedAgentRef.current === selectedAgent) return;
-    autoTestedAgentRef.current = selectedAgent;
-    setTestAuthResult(null);
-    setTestAuthLoading(true);
-    onCheckAuth(selectedAgent)
-      .then((result) => setTestAuthResult(result))
-      .catch(() => {})
-      .finally(() => setTestAuthLoading(false));
-  }, [currentStep, selectedAgent, onCheckAuth]);
 
   // ─── Footer ───────────────────────────────────────
 

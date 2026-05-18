@@ -84,18 +84,25 @@ export type {
 /**
  * Get the default permission mode for a given agentic tool
  *
- * Claude Code / Codex defaults assume Agor's environment-level sandbox
- * (worktree FS scoping, Unix impersonation in insulated/strict modes,
- * executor process isolation) is the actual defense — per-call approval
- * prompts are friction without benefit in an MCP-heavy session where
- * every Agor self-call would otherwise gate. Users / parent sessions /
- * per-session overrides still trump these defaults via resolvePermissionConfig.
- *
  * Per tool:
- * - Claude Code: 'bypassPermissions' (no per-call prompts; sandbox is the defense)
- * - Codex: 'allow-all' — maps to sandbox `workspace-write` + approval `never`
+ * - Claude Code: 'acceptEdits' — auto-accept file edits. Bash/shell tool
+ *   prompts still flow through Agor's permission UI; MCP tool calls for
+ *   the built-in `agor` server and any attached MCP servers are
+ *   auto-approved by the executor's canUseTool hook (see
+ *   sdk-handlers/claude/permissions/permission-hooks.ts), so MCP-heavy
+ *   sessions don't death-by-modal. Users can flip a running session to
+ *   `bypassPermissions` mid-flight from the session UI.
+ * - Codex: 'allow-all' — maps to sandbox `workspace-write` + approval
+ *   `never` + network-on. Codex's MCP auto-approve is wired through
+ *   `default_tools_approval_mode = "approve"` on each server config
+ *   (see prompt-service.ts buildMcpServersConfig), so Agor self-calls
+ *   don't get silently cancelled by the elicitation prompt. Workspace
+ *   sandbox still constrains shell exec.
  * - Gemini: 'autoEdit' (unchanged — pending separate audit)
  * - OpenCode: 'autoEdit' (unchanged — pending separate audit)
+ *
+ * Users / parent sessions / per-session overrides still trump these
+ * defaults via resolvePermissionConfig.
  */
 export function getDefaultPermissionMode(agenticTool: AgenticToolName): PermissionMode {
   switch (agenticTool) {
@@ -106,9 +113,9 @@ export function getDefaultPermissionMode(agenticTool: AgenticToolName): Permissi
     case 'opencode':
       return 'autoEdit'; // OpenCode auto-approves, similar to Gemini
     case 'copilot':
-      return 'bypassPermissions'; // Copilot uses same semantics as Claude Code
+      return 'acceptEdits'; // Copilot uses same semantics as Claude Code
     default:
-      return 'bypassPermissions'; // Claude Code
+      return 'acceptEdits'; // Claude Code
   }
 }
 
