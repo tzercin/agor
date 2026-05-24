@@ -454,6 +454,47 @@ export function createGit(
   return { git };
 }
 
+/**
+ * Build a git client pre-scoped for talking to `remoteUrl`. Centralises the
+ * "derive the auth-header host from the URL, then call createGit" two-step
+ * that every remote-talking helper needs (cloneRepo, createBranchAsClone, …).
+ * Keep call sites focused on their domain logic instead of repeating the
+ * auth-host derivation.
+ */
+export function createGitForRemote(
+  remoteUrl: string,
+  env?: Record<string, string>
+): { git: ReturnType<typeof simpleGit> } {
+  return createGit(undefined, env, parseHostFromGitUrl(remoteUrl));
+}
+
+/**
+ * Register `path` as a git `safe.directory` in the daemon user's global
+ * gitconfig. Multi-user setups (worktrees owned by one uid, accessed by
+ * another) trip "dubious ownership" otherwise. Non-fatal: logs a warning
+ * and returns on failure, since the worktree itself is already on disk.
+ *
+ * IMPORTANT: never pass user env here. `createGit(_, env)` activates the
+ * impersonation isolation block (`GIT_CONFIG_GLOBAL=/dev/null`), and
+ * `addConfig(..., 'global')` writes to whatever `GIT_CONFIG_GLOBAL` points
+ * at — git would try to lock `/dev/null` and fail with permission denied.
+ * The safe.directory entry belongs in the daemon user's real `~/.gitconfig`
+ * so daemon-side git ops (which do not load /dev/null) can find it.
+ */
+export async function addSafeDirectoryBestEffort(path: string, logPrefix?: string): Promise<void> {
+  const prefix = logPrefix ? `${logPrefix} ` : '';
+  try {
+    const { git } = createGit(path);
+    await git.addConfig('safe.directory', path, true, 'global');
+    console.log(`${prefix}✅ Added ${path} to git safe.directory`);
+  } catch (error) {
+    console.warn(
+      `${prefix}⚠️  Failed to add ${path} to safe.directory:`,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
 export interface CloneOptions {
   url: string;
   targetDir?: string;
@@ -590,11 +631,10 @@ export async function cloneRepo(options: CloneOptions): Promise<CloneResult> {
   // http.extraheader; GIT_CONFIG_GLOBAL isolation is active only when env is
   // provided (intentional — callers without env inherit the daemon process
   // environment so they can read /etc/gitconfig, safe.directory, etc.).
-  // Derive the auth-header host from the clone URL so GitHub Enterprise and
-  // self-hosted GitLab work without per-deployment configuration. (Bitbucket
-  // Cloud needs a different username shape — see buildAuthHeaderEnv comments.)
-  const authHost = parseHostFromGitUrl(cloneUrl);
-  const { git } = createGit(undefined, options.env, authHost);
+  // `createGitForRemote` derives the auth-header host from the clone URL so
+  // GitHub Enterprise / self-hosted GitLab work without per-deployment config.
+  // (Bitbucket Cloud needs a different username shape — see buildAuthHeaderEnv.)
+  const { git } = createGitForRemote(cloneUrl, options.env);
 
   if (options.onProgress) {
     git.outputHandler((_command, _stdout, _stderr) => {
@@ -829,6 +869,20 @@ export async function createWorktree(
     throw new Error('repoPath is required but was null/undefined');
   }
 
+  // Refuse to clobber an existing directory. Matches createBranchAsClone's
+  // guard, so worktree-mode and clone-mode surface the same user-facing
+  // error when the path is already taken (typically by an archived or
+  // partially-cleaned worktree). Used to live in the daemon as a
+  // synchronous preflight; moved here so the executor / core layer is the
+  // single source of truth for filesystem facts.
+  if (existsSync(worktreePath)) {
+    throw new Error(
+      `Target directory '${worktreePath}' already exists on disk. ` +
+        `This usually means an archived or partially-cleaned worktree still occupies this path. ` +
+        `Please choose a different name or clean up the existing directory.`
+    );
+  }
+
   // Validate caller-supplied refs before they hit the git CLI, to prevent
   // option injection (e.g. ref = "--upload-pack=/tmp/payload") and command
   // smuggling via newlines.
@@ -940,27 +994,209 @@ export async function createWorktree(
     }
   }
 
-  // Add worktree to safe.directory to prevent "dubious ownership" errors
-  // This is needed when worktrees are owned by a different user (e.g., daemon user)
-  // but accessed by other users (e.g., in multi-user Linux environments).
-  //
-  // IMPORTANT: do NOT pass the user `env` here. `createGit(_, env)` activates
-  // the impersonation isolation block (`GIT_CONFIG_GLOBAL=/dev/null`), and
-  // `addConfig(..., 'global')` writes to whatever `GIT_CONFIG_GLOBAL` points
-  // at — git would try to lock `/dev/null` and fail with permission denied.
-  // The safe.directory entry belongs in the daemon user's real `~/.gitconfig`
-  // so daemon-side git ops (which do not load /dev/null) can find it.
-  try {
-    const { git: safeDirGit } = createGit(worktreePath);
-    await safeDirGit.addConfig('safe.directory', worktreePath, true, 'global');
-    console.log(`✅ Added ${worktreePath} to git safe.directory`);
-  } catch (error) {
-    // Non-fatal - log warning and continue
-    console.warn(
-      `⚠️  Failed to add ${worktreePath} to safe.directory:`,
-      error instanceof Error ? error.message : String(error)
+  // Register the worktree as a safe.directory in the daemon user's
+  // ~/.gitconfig — multi-user setups (worktrees owned by one uid, accessed
+  // by another) trip "dubious ownership" otherwise. Non-fatal; the worktree
+  // itself is already on disk.
+  await addSafeDirectoryBestEffort(worktreePath);
+}
+
+/**
+ * Options for {@link createBranchAsClone} — the self-standing-clone
+ * counterpart to {@link createWorktree}.
+ *
+ * Branch storage mode = 'clone' produces a working directory whose `.git/`
+ * is a real directory (not a `gitdir:` pointer file), with its own
+ * `.git/config`, refs, and credentials surface. Closes the cross-branch
+ * leak vectors that the Layer A defenses exist to mitigate. See
+ * `docs/internal/branch-vs-worktree-migration-analysis-2026-05-20.md` §1.
+ */
+export interface CreateBranchAsCloneOptions {
+  /** Remote URL to clone from (https://, ssh://, git@host:path, file://, or local path). */
+  remoteUrl: string;
+  /** Absolute path where the new clone should land. Must not already exist. */
+  targetPath: string;
+  /**
+   * Branch to clone. Forwarded as `git clone --branch <ref>`. The remote
+   * must already have this ref. When {@link newBranchName} is also set,
+   * this is the *base* ref the new branch is created off (the typical
+   * "feature off main" flow).
+   */
+  ref: string;
+  /**
+   * Optional new branch to create after the clone, via
+   * `git checkout -b <newBranchName>` against the cloned tip of {@link ref}.
+   * Use this when the caller wants `createBranch=true` semantics in
+   * clone-mode: the remote doesn't have the new branch yet, so we clone
+   * the source and fork locally. Omit to just check out `ref` directly.
+   */
+  newBranchName?: string;
+  /**
+   * Optional shallow-clone depth. Positive integer → `--depth N`. Omit (or
+   * pass `undefined`) for a full clone with complete history.
+   */
+  depth?: number;
+  /**
+   * `--single-branch`. Defaults to `true` — we only need the one branch we
+   * just asked for, and skipping the rest is cheaper. Pass `false` for the
+   * rare case where you want every remote ref locally.
+   */
+  singleBranch?: boolean;
+  /**
+   * Optional `git clone --reference <path>` object-cache borrow.
+   *
+   * When set AND the path exists on the calling process's filesystem at
+   * runtime, this turns the per-branch `.git/objects/` into an `alternates`
+   * pointer at `<path>/.git/objects/` — disk drops from "full pack copy"
+   * (hundreds of MB for big repos) to "a few MB of refs/config". The
+   * config/credentials isolation that clone mode buys is preserved: only
+   * the immutable object store is shared with the daemon-owned base clone.
+   *
+   * When set but the path does NOT exist (executor running in a different
+   * mount, base clone not yet seeded, etc.), the `--reference` flag is
+   * silently dropped and a regular clone runs — at higher disk cost but
+   * still correct. This lets the daemon hand the executor a "use this if
+   * you have it" hint without coupling the two filesystems.
+   *
+   * NEVER paired with `--dissociate`: dissociate copies all reachable
+   * objects out of the reference into the new clone (~equivalent to a
+   * naïve clone), defeating the purpose. See design doc §5.
+   *
+   * Operational caveat: `git gc --prune=now` against the reference can
+   * orphan objects that branches' alternates pointers still depend on.
+   * Daemon-side base-cache management must avoid `--prune=now` (a future
+   * `branch_storage.base_cache_gc_prune` config knob will enforce this).
+   */
+  referencePath?: string;
+  /** Per-user environment variables (GITHUB_TOKEN, GH_TOKEN, …). */
+  env?: Record<string, string>;
+}
+
+/**
+ * Result of {@link createBranchAsClone}. Shape mirrors what the executor
+ * handler wants out of {@link createWorktree} so the call sites can stay
+ * uniform across storage modes.
+ */
+export interface CreateBranchAsCloneResult {
+  /** Absolute path of the created clone (echoes back `targetPath`). */
+  path: string;
+  /**
+   * Branch the working tree is actually on after the call. Equal to
+   * `newBranchName` when set (post-checkout); otherwise equal to `ref`.
+   */
+  ref: string;
+}
+
+/**
+ * Create a self-standing clone of a remote at `targetPath` and check out a
+ * branch. Sibling to {@link createWorktree}; chosen at worktree-create time
+ * by the `storage_mode = 'clone'` opt-in.
+ *
+ * Two flows:
+ *  - Without `newBranchName`: clone `ref` directly. Equivalent to
+ *    `git clone --branch <ref> [--depth N] --single-branch <remoteUrl> <targetPath>`.
+ *  - With `newBranchName`: clone `ref` as the base, then
+ *    `git checkout -b <newBranchName>`. This is the typical "feature off
+ *    main" flow that the create-time UI emits; the new branch doesn't
+ *    exist on the remote yet, so we can't `git clone --branch <new>`.
+ *
+ * Unlike {@link createWorktree}, this issues a real `git clone` and does
+ * not touch the per-repo base clone at `~/.agor/repos/<slug>/`. The
+ * resulting working directory has its own `.git/` directory — `.git/config`,
+ * remotes, credentials, hooks, and refs are all branch-local.
+ *
+ * Implemented via `simple-git`; no `execSync`/`spawn`. Credentials are
+ * delivered via `http.<host>.extraheader` env vars exactly like
+ * {@link cloneRepo}, never on argv.
+ *
+ * @throws if `targetPath` already exists, either ref is invalid, the
+ *         underlying clone fails (network, auth, missing base ref, …), or
+ *         the post-clone `checkout -b` fails.
+ */
+export async function createBranchAsClone(
+  options: CreateBranchAsCloneOptions
+): Promise<CreateBranchAsCloneResult> {
+  const { remoteUrl, targetPath, ref, newBranchName, depth, referencePath, env } = options;
+  const singleBranch = options.singleBranch ?? true;
+
+  if (!remoteUrl) {
+    throw new Error('remoteUrl is required');
+  }
+  if (!targetPath) {
+    throw new Error('targetPath is required');
+  }
+  await validateGitRef(ref);
+  if (newBranchName !== undefined) {
+    await validateGitRef(newBranchName);
+  }
+  if (depth !== undefined && (!Number.isInteger(depth) || depth <= 0)) {
+    throw new Error(`Invalid clone depth: expected positive integer, got ${depth}`);
+  }
+
+  if (existsSync(targetPath)) {
+    throw new Error(
+      `Target directory '${targetPath}' already exists. ` +
+        `Refusing to clone over existing contents — pick a different path or remove the directory first.`
     );
   }
+
+  // Resolve `--reference` opportunistically: caller passes the base-cache
+  // path they'd *like* to use; we check on this process's filesystem and
+  // either use it or fall back silently. This decouples the daemon's
+  // knowledge of "where the base clone lives" from the executor's
+  // filesystem reality, so future mount asymmetry (remote executors,
+  // hosted env-pods, etc.) doesn't break clone creation — it just costs
+  // more disk for branches that can't see the cache.
+  let useReference = false;
+  if (referencePath) {
+    if (existsSync(referencePath)) {
+      useReference = true;
+    } else {
+      console.log(
+        `[createBranchAsClone] referencePath '${referencePath}' not present on this filesystem — ` +
+          `falling back to a full clone without --reference.`
+      );
+    }
+  }
+
+  const { git } = createGitForRemote(remoteUrl, env);
+
+  // `--branch <ref>` pins the working tree to the ref instead of remote HEAD.
+  // `--single-branch` avoids pulling sibling branches we'll never look at.
+  // `--depth N` (optional) shallow-truncates history.
+  // `--reference <path>` (optional) borrows objects from a local base
+  // clone via alternates; deliberately NOT paired with `--dissociate`
+  // (see option doc above + design doc §5).
+  const cloneArgs: string[] = ['--branch', ref];
+  if (singleBranch) cloneArgs.push('--single-branch');
+  if (depth !== undefined) cloneArgs.push('--depth', String(depth));
+  if (useReference && referencePath) cloneArgs.push('--reference', referencePath);
+
+  console.log(
+    `[createBranchAsClone] Cloning ${remoteUrl} → ${targetPath} ` +
+      `(ref=${ref}${newBranchName ? `, newBranch=${newBranchName}` : ''}, ` +
+      `depth=${depth ?? 'full'}, singleBranch=${singleBranch}, ` +
+      `reference=${useReference ? referencePath : 'none'})`
+  );
+  await git.clone(remoteUrl, targetPath, cloneArgs);
+
+  // Optional post-clone fork: create the new branch off the cloned tip.
+  // simple-git's `.checkoutLocalBranch` issues `git checkout -b <name>`.
+  // Re-scope to the working tree (not the original `git` instance, which
+  // wasn't bound to a baseDir).
+  let finalRef = ref;
+  if (newBranchName) {
+    console.log(
+      `[createBranchAsClone] Creating local branch '${newBranchName}' off cloned '${ref}'`
+    );
+    const { git: cloneGit } = createGit(targetPath, env);
+    await cloneGit.checkoutLocalBranch(newBranchName);
+    finalRef = newBranchName;
+  }
+
+  await addSafeDirectoryBestEffort(targetPath, '[createBranchAsClone]');
+
+  return { path: targetPath, ref: finalRef };
 }
 
 /**

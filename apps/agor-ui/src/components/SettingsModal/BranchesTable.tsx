@@ -53,6 +53,8 @@ interface BranchesTableProps {
       sourceBranch: string;
       pullLatest: boolean;
       boardId?: string;
+      storage_mode?: 'worktree' | 'clone';
+      clone_depth?: number;
     }
   ) => void;
   onRowClick?: (worktree: Worktree) => void;
@@ -272,6 +274,11 @@ export const BranchesTable: React.FC<BranchesTableProps> = ({
         localStorage.setItem('agor:lastUsedBoardId', values.boardId);
       }
 
+      const storageMode: 'worktree' | 'clone' = values.storage_mode ?? 'worktree';
+      const cloneDepth =
+        storageMode === 'clone' && typeof values.clone_depth === 'number' && values.clone_depth > 0
+          ? values.clone_depth
+          : undefined;
       onCreate?.(values.repoId, {
         name: values.name,
         ref: branchName,
@@ -279,6 +286,8 @@ export const BranchesTable: React.FC<BranchesTableProps> = ({
         sourceBranch: values.sourceBranch,
         pullLatest: true, // Always fetch latest before creating worktree
         boardId: values.boardId, // Optional: add to board
+        storage_mode: storageMode,
+        ...(cloneDepth !== undefined ? { clone_depth: cloneDepth } : {}),
       });
       setCreateModalOpen(false);
       form.resetFields();

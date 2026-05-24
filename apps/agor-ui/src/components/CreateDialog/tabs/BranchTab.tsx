@@ -16,6 +16,14 @@ export interface BranchTabConfig {
   pull_request_url?: string;
   board_id?: string;
   position?: { x: number; y: number };
+  /**
+   * Branch storage model. 'worktree' = legacy `git worktree add`. 'clone' =
+   * self-standing `git clone`. Default 'worktree' preserves existing flow.
+   * See docs/internal/branch-vs-worktree-migration-analysis-2026-05-20.md.
+   */
+  storage_mode?: 'worktree' | 'clone';
+  /** Shallow-clone depth — only meaningful when storage_mode='clone'. */
+  clone_depth?: number;
 }
 
 export interface BranchTabProps {
@@ -90,6 +98,11 @@ export const BranchTab: React.FC<BranchTabProps> = ({
     try {
       const values = await form.validateFields();
       const refType = values.refType || 'branch';
+      const storageMode: 'worktree' | 'clone' = values.storage_mode ?? 'worktree';
+      const cloneDepth =
+        storageMode === 'clone' && typeof values.clone_depth === 'number' && values.clone_depth > 0
+          ? values.clone_depth
+          : undefined;
       const config: BranchTabConfig = {
         repoId: values.repoId,
         name: values.name,
@@ -102,6 +115,8 @@ export const BranchTab: React.FC<BranchTabProps> = ({
         pull_request_url: values.pull_request_url,
         board_id: currentBoardId,
         position: defaultPosition,
+        storage_mode: storageMode,
+        ...(cloneDepth !== undefined ? { clone_depth: cloneDepth } : {}),
       };
 
       if (values.repoId) {

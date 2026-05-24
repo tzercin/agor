@@ -25,6 +25,7 @@ import {
   categorizeGitError,
   cleanWorktree,
   cloneRepo,
+  createBranchAsClone,
   createWorktree,
   deleteBranch,
   deleteWorktreeDirectory,
@@ -459,6 +460,10 @@ export async function handleGitWorktreeAdd(
         branch: payload.params.branch,
         sourceBranch: payload.params.sourceBranch,
         createBranch: payload.params.createBranch,
+        storageMode: payload.params.storageMode,
+        cloneDepth: payload.params.cloneDepth,
+        remoteUrl: payload.params.remoteUrl,
+        referencePath: payload.params.referencePath,
       },
     };
   }
@@ -484,14 +489,53 @@ export async function handleGitWorktreeAdd(
     const sourceBranch = payload.params.sourceBranch;
     const refType = payload.params.refType;
     const restoreMode = payload.params.restoreMode ?? false;
+    const storageMode = payload.params.storageMode ?? 'worktree';
+    const cloneDepth = payload.params.cloneDepth;
+    const remoteUrl = payload.params.remoteUrl;
+    const referencePath = payload.params.referencePath;
 
     console.log(`[git.worktree.add] Creating worktree at ${worktreePath}...`);
     console.log(
-      `[git.worktree.add] Repo: ${repoPath}, Branch: ${branch}, CreateBranch: ${createBranch}, RestoreMode: ${restoreMode}, RefType: ${refType || 'branch'}`
+      `[git.worktree.add] Repo: ${repoPath}, Branch: ${branch}, CreateBranch: ${createBranch}, RestoreMode: ${restoreMode}, RefType: ${refType || 'branch'}, StorageMode: ${storageMode}`
     );
 
     // Create the git worktree on filesystem
-    if (restoreMode && sourceBranch) {
+    if (storageMode === 'clone') {
+      // Self-standing clone path. The remote URL is daemon-resolved from the
+      // repo record; refuse to silently fall through to worktree mode if it
+      // didn't come along — that would defeat the leak-defense reason for
+      // picking clone mode in the first place. (Belt + braces: the executor
+      // payload schema also enforces this via superRefine.)
+      if (!remoteUrl) {
+        throw new Error(
+          `storageMode='clone' requires remoteUrl in payload (got none). ` +
+            `The daemon should forward repo.remote_url alongside storageMode.`
+        );
+      }
+
+      // When creating a new branch, clone the source branch and have the
+      // helper fork off the cloned tip. When checking out an existing
+      // branch, just clone the ref directly. The helper owns both flows so
+      // the executor handler doesn't have to orchestrate post-clone git ops.
+      const cloneRef = createBranch ? sourceBranch || branch : branch;
+      console.log(
+        `[git.worktree.add] Using createBranchAsClone (remote=${remoteUrl}, ` +
+          `ref=${cloneRef}${createBranch && branch !== cloneRef ? `, newBranch=${branch}` : ''}, ` +
+          `depth=${cloneDepth ?? 'full'}, referenceHint=${referencePath ?? 'none'})`
+      );
+      await createBranchAsClone({
+        remoteUrl,
+        targetPath: worktreePath,
+        ref: cloneRef,
+        ...(createBranch && branch !== cloneRef ? { newBranchName: branch } : {}),
+        depth: cloneDepth,
+        // Pass the daemon's hint through unconditionally. The helper does
+        // the existsSync check on the executor's filesystem and falls back
+        // gracefully if the path isn't actually mounted here.
+        ...(referencePath ? { referencePath } : {}),
+        env,
+      });
+    } else if (restoreMode && sourceBranch) {
       // Restore mode: smart branch detection — checks if branch exists on remote,
       // falls back to creating from base ref if not. Safe because it only creates
       // a new branch when ls-remote confirms the branch doesn't exist anywhere.
@@ -546,9 +590,15 @@ export async function handleGitWorktreeAdd(
           error instanceof Error ? error.message : String(error)
         );
       }
-    } else if (!payload.params.initUnixGroup) {
-      // RBAC is explicitly disabled - set basic permissions for .git/worktrees/<name>/
-      // This ensures git operations work even without Unix group isolation
+    } else if (!payload.params.initUnixGroup && storageMode === 'worktree') {
+      // RBAC is explicitly disabled — set basic permissions for the base
+      // repo's .git/worktrees/<name>/ entry so git operations work even
+      // without Unix group isolation.
+      //
+      // Clone-mode skips this: there's no `.git/worktrees/<name>/` entry in
+      // any base repo (the working tree owns its own `.git/` directory),
+      // so running this would log a bogus failure on every clone-mode
+      // create. The clone's `.git/` is set up by `git clone` itself.
       try {
         console.log(
           `[git.worktree.add] RBAC disabled, setting basic permissions for .git/worktrees/${worktreeName}`
@@ -742,6 +792,7 @@ export async function handleGitWorktreeRemove(
         worktreePath: payload.params.worktreePath,
         force: payload.params.force,
         deleteDbRecord,
+        storageMode: payload.params.storageMode,
       },
     };
   }
@@ -756,73 +807,108 @@ export async function handleGitWorktreeRemove(
 
     const worktreeId = payload.params.worktreeId;
     const worktreePath = payload.params.worktreePath;
+    const storageMode = payload.params.storageMode ?? 'worktree';
 
-    console.log(`[git.worktree.remove] Removing worktree at ${worktreePath}...`);
+    console.log(
+      `[git.worktree.remove] Removing worktree at ${worktreePath} (storageMode=${storageMode})...`
+    );
 
     // Find the repo path from the worktree's .git file
-    const { readFile } = await import('node:fs/promises');
+    const { readFile, stat } = await import('node:fs/promises');
     const { existsSync } = await import('node:fs');
     const { join, dirname, basename } = await import('node:path');
 
-    const gitFile = join(worktreePath, '.git');
+    const gitPath = join(worktreePath, '.git');
     let filesystemRemoved = false;
 
-    if (existsSync(gitFile)) {
-      // Read .git file to find the main repo
-      // Format: gitdir: /path/to/repo/.git/worktrees/<name>
-      const gitContent = await readFile(gitFile, 'utf-8');
-      const match = gitContent.match(/gitdir:\s*(.+)/);
-
-      if (!match) {
-        throw new Error(`Invalid .git file in worktree: ${gitFile}`);
-      }
-
-      // Extract repo path from gitdir path
-      // gitdir points to: <repo>/.git/worktrees/<name>
-      // We need: <repo>
-      const gitdirPath = match[1].trim();
-      const gitWorktreesDir = dirname(gitdirPath); // <repo>/.git/worktrees
-      const dotGitDir = dirname(gitWorktreesDir); // <repo>/.git
-      const repoPath = dirname(dotGitDir); // <repo>
-
-      const worktreeName = basename(worktreePath);
-
-      console.log(`[git.worktree.remove] Repo path: ${repoPath}, Worktree name: ${worktreeName}`);
-
-      // Remove the worktree using git (deregisters from .git/worktrees/)
-      await removeWorktree(repoPath, worktreeName);
-      console.log(`[git.worktree.remove] Git worktree deregistered`);
-
-      // git worktree remove --force may leave residual files on disk.
-      // Fully delete the directory to reclaim all disk space.
+    // Clone-mode short-circuit: there's no parent base repo to deregister
+    // from, no `gitdir:` pointer file, and `git worktree remove --force`
+    // would fail (or worse, mis-target). Just blow away the directory.
+    if (storageMode === 'clone') {
       if (existsSync(worktreePath)) {
-        console.log(`[git.worktree.remove] Directory still exists, removing residual files...`);
+        console.log(
+          `[git.worktree.remove] Clone mode — removing self-standing directory ${worktreePath}`
+        );
         await deleteWorktreeDirectory(worktreePath);
-        console.log(`[git.worktree.remove] Directory fully removed`);
+        filesystemRemoved = true;
+      } else {
+        console.log(
+          '[git.worktree.remove] Clone mode — directory already absent, skipping filesystem removal'
+        );
       }
+    } else if (existsSync(gitPath)) {
+      // Worktree mode: .git is a file (`gitdir: …`) pointing back at the
+      // base repo's `.git/worktrees/<name>`. Read it to find the base repo
+      // and deregister cleanly.
+      //
+      // Defensive: if .git is somehow a directory here despite storage_mode
+      // being 'worktree' (mislabeled DB row from a manual conversion), fall
+      // back to the clone-mode removal path rather than misreading a dir as
+      // a `gitdir:` file. See design doc §2 operational caveats.
+      const gitStat = await stat(gitPath);
+      if (gitStat.isDirectory()) {
+        console.warn(
+          `[git.worktree.remove] DB says storage_mode='worktree' but ${gitPath} is a directory — treating as clone-mode removal`
+        );
+        await deleteWorktreeDirectory(worktreePath);
+        filesystemRemoved = true;
+      } else {
+        // Read .git file to find the main repo
+        // Format: gitdir: /path/to/repo/.git/worktrees/<name>
+        const gitContent = await readFile(gitPath, 'utf-8');
+        const match = gitContent.match(/gitdir:\s*(.+)/);
 
-      filesystemRemoved = true;
-      console.log(`[git.worktree.remove] Worktree removed from filesystem`);
+        if (!match) {
+          throw new Error(`Invalid .git file in worktree: ${gitPath}`);
+        }
 
-      // Delete the associated branch if requested
-      if (payload.params.deleteBranch && payload.params.branch) {
-        const branchToDelete = payload.params.branch;
-        try {
-          console.log(`[git.worktree.remove] Deleting branch '${branchToDelete}'...`);
-          const deleted = await deleteBranch(repoPath, branchToDelete);
-          if (deleted) {
-            console.log(`[git.worktree.remove] Branch '${branchToDelete}' deleted`);
-          } else {
-            console.log(
-              `[git.worktree.remove] Branch '${branchToDelete}' not found (already deleted)`
+        // Extract repo path from gitdir path
+        // gitdir points to: <repo>/.git/worktrees/<name>
+        // We need: <repo>
+        const gitdirPath = match[1].trim();
+        const gitWorktreesDir = dirname(gitdirPath); // <repo>/.git/worktrees
+        const dotGitDir = dirname(gitWorktreesDir); // <repo>/.git
+        const repoPath = dirname(dotGitDir); // <repo>
+
+        const worktreeName = basename(worktreePath);
+
+        console.log(`[git.worktree.remove] Repo path: ${repoPath}, Worktree name: ${worktreeName}`);
+
+        // Remove the worktree using git (deregisters from .git/worktrees/)
+        await removeWorktree(repoPath, worktreeName);
+        console.log(`[git.worktree.remove] Git worktree deregistered`);
+
+        // git worktree remove --force may leave residual files on disk.
+        // Fully delete the directory to reclaim all disk space.
+        if (existsSync(worktreePath)) {
+          console.log(`[git.worktree.remove] Directory still exists, removing residual files...`);
+          await deleteWorktreeDirectory(worktreePath);
+          console.log(`[git.worktree.remove] Directory fully removed`);
+        }
+
+        filesystemRemoved = true;
+        console.log(`[git.worktree.remove] Worktree removed from filesystem`);
+
+        // Delete the associated branch if requested
+        if (payload.params.deleteBranch && payload.params.branch) {
+          const branchToDelete = payload.params.branch;
+          try {
+            console.log(`[git.worktree.remove] Deleting branch '${branchToDelete}'...`);
+            const deleted = await deleteBranch(repoPath, branchToDelete);
+            if (deleted) {
+              console.log(`[git.worktree.remove] Branch '${branchToDelete}' deleted`);
+            } else {
+              console.log(
+                `[git.worktree.remove] Branch '${branchToDelete}' not found (already deleted)`
+              );
+            }
+          } catch (branchError) {
+            // Log but don't fail the overall operation
+            console.warn(
+              `[git.worktree.remove] Failed to delete branch '${branchToDelete}':`,
+              branchError instanceof Error ? branchError.message : String(branchError)
             );
           }
-        } catch (branchError) {
-          // Log but don't fail the overall operation
-          console.warn(
-            `[git.worktree.remove] Failed to delete branch '${branchToDelete}':`,
-            branchError instanceof Error ? branchError.message : String(branchError)
-          );
         }
       }
     } else if (existsSync(worktreePath)) {

@@ -9,10 +9,10 @@
  * the daemon handles database records and business logic.
  */
 
-import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import {
+  ensureBranchStorageModeAllowed,
   extractSlugFromUrl,
   isValidGitUrl,
   isValidSlug,
@@ -20,20 +20,19 @@ import {
   normalizeRepoUrl,
   PAGINATION,
   parseAgorYml,
+  resolveBranchStorageConfig,
   writeAgorYml,
 } from '@agor/core/config';
 import { type Database, RepoRepository, shortId, WorktreeRepository } from '@agor/core/db';
 import { autoAssignWorktreeUniqueId } from '@agor/core/environment/variable-resolver';
 import { type Application, Forbidden, NotAuthenticated } from '@agor/core/feathers';
 import {
-  createGit,
   extractRepoName,
   getDefaultBranch,
   getRemoteUrl,
   getReposDir,
   getWorktreePath,
   isValidGitRepo,
-  listWorktrees,
 } from '@agor/core/git';
 import type {
   AuthenticatedParams,
@@ -567,6 +566,13 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       others_can?: WorktreePermissionLevel;
       others_fs_access?: 'none' | 'read' | 'write';
       environment_variant?: string;
+      /**
+       * Branch storage model — see docs/internal/branch-vs-worktree-migration-analysis-2026-05-20.md.
+       * 'worktree' (default) = native `git worktree add`. 'clone' = self-standing `git clone`.
+       */
+      storage_mode?: 'worktree' | 'clone';
+      /** Shallow clone depth (only when storage_mode='clone'). NULL/undefined = full clone. */
+      clone_depth?: number;
     },
     params?: RepoParams
   ): Promise<Worktree> {
@@ -589,86 +595,43 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       throw new Error(`A worktree named '${data.name}' already exists in this repository`);
     }
 
-    // Pre-flight checks: validate git state before creating DB record
-    // This gives the user immediate feedback instead of a silent fire-and-forget failure
-    if (repo.local_path) {
-      try {
-        // Use the shared factory so the unsafe-ops scanner is opt-in
-        // (otherwise a daemon env carrying GIT_SSH_COMMAND or similar
-        // would throw before the fetch even ran).
-        const { git } = createGit(repo.local_path);
-
-        // Check 1: Validate sourceBranch exists on remote (if specified)
-        // Skip for tags — tags are validated differently (they don't have origin/ prefix)
-        if (data.sourceBranch && data.createBranch && data.refType !== 'tag') {
-          try {
-            await git.fetch(['origin']);
-            const remoteBranches = await git.branch(['-r']);
-            const remoteRef = `origin/${data.sourceBranch}`;
-            if (!remoteBranches.all.includes(remoteRef)) {
-              // Also check local branches as fallback
-              const localBranches = await git.branch();
-              if (!localBranches.all.includes(data.sourceBranch)) {
-                throw new Error(
-                  `Source branch '${data.sourceBranch}' does not exist on remote or locally. ` +
-                    `Available remote branches can be listed with 'git branch -r'. ` +
-                    `Please specify a valid sourceBranch.`
-                );
-              }
-            }
-          } catch (error) {
-            if (
-              error instanceof Error &&
-              error.message.includes('does not exist on remote or locally')
-            ) {
-              throw error;
-            }
-            // Fetch failed — log warning but continue (executor will retry)
-            console.warn(
-              `⚠️  Pre-flight sourceBranch check failed (continuing anyway):`,
-              error instanceof Error ? error.message : String(error)
-            );
-          }
-        }
-
-        // Check 2: Detect stale or conflicting branches
-        if (data.createBranch) {
-          const branches = await git.branch();
-          const branchName = data.ref || data.name;
-
-          if (branches.all.includes(branchName)) {
-            // Branch exists — check if it's in use by another worktree
-            const gitWorktrees = await listWorktrees(repo.local_path);
-            const branchInUse = gitWorktrees.some((wt: { ref?: string }) => wt.ref === branchName);
-
-            if (branchInUse) {
-              throw new Error(
-                `A branch named '${branchName}' already exists and is in use by another worktree. Please choose a different name.`
-              );
-            }
-
-            // Branch exists but is orphaned — the executor will clean it up automatically
-            console.log(
-              `⚠️  Branch '${branchName}' exists but is orphaned (stale). Executor will clean it up.`
-            );
-          }
-        }
-      } catch (error) {
-        // Re-throw user-facing errors
-        if (
-          error instanceof Error &&
-          (error.message.includes('already exists and is in use') ||
-            error.message.includes('does not exist on remote or locally'))
-        ) {
-          throw error;
-        }
-        // Log but don't block creation for other git errors (e.g., repo not accessible)
-        console.warn(
-          `⚠️  Pre-flight branch check failed (continuing anyway):`,
-          error instanceof Error ? error.message : String(error)
+    // Resolve + validate the storage mode. The daemon owns DB/auth/config
+    // shape; everything else (git/filesystem inspection, conflict detection,
+    // path-exists checks) belongs to the executor (see operator's layering
+    // rule: "daemon/client = database, executor = filesystem").
+    const { defaultMode } = resolveBranchStorageConfig();
+    const storageMode: 'worktree' | 'clone' = data.storage_mode ?? defaultMode;
+    ensureBranchStorageModeAllowed(storageMode);
+    const cloneDepth = data.clone_depth;
+    if (cloneDepth !== undefined) {
+      if (storageMode !== 'clone') {
+        throw new Error(
+          `clone_depth is only meaningful when storage_mode='clone' (got storage_mode='${storageMode}'). ` +
+            `Omit clone_depth or set storage_mode='clone'.`
+        );
+      }
+      if (!Number.isInteger(cloneDepth) || cloneDepth <= 0) {
+        throw new Error(
+          `clone_depth must be a positive integer when set (got ${cloneDepth}). ` +
+            `Omit to make a full clone, or pass a positive int for --depth.`
         );
       }
     }
+    if (storageMode === 'clone' && !repo.remote_url) {
+      throw new Error(
+        `Cannot create a clone-mode worktree for repo '${repo.slug}': repo has no remote_url. ` +
+          `Use storage_mode='worktree' or register the repo with a remote first.`
+      );
+    }
+
+    // NOTE: Filesystem / git-state preflights (target-dir-exists, source-ref
+    // existence, branch-already-checked-out) used to live here. They have
+    // moved to the executor / core helpers — they're git/filesystem facts,
+    // not DB facts. The executor surfaces failures via
+    // `filesystem_status='failed'` + `error_message`, which the UI already
+    // renders cleanly. Daemon stays focused on DB/auth/config validation.
+    // See `core.createWorktree` / `createBranchAsClone` for the equivalent
+    // checks at the materialisation boundary.
 
     // Validate boardId exists before creating DB record (FK constraint would reject it)
     // Board is stored for later use in smart positioning
@@ -697,39 +660,11 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
 
     const worktreePath = getWorktreePath(repo.slug, data.name);
 
-    // Fail-fast: check if target directory already exists on disk
-    if (existsSync(worktreePath)) {
-      throw new Error(
-        `Target directory '${worktreePath}' already exists on disk. ` +
-          `This usually means an archived or partially-cleaned worktree still occupies this path. ` +
-          `Please choose a different name or clean up the existing directory.`
-      );
-    }
-
-    // Fail-fast: check if the branch is already checked out by another git worktree
-    // (covers non-createBranch cases not handled by the pre-flight check above)
-    if (!data.createBranch && repo.local_path) {
-      try {
-        const gitWorktrees = await listWorktrees(repo.local_path);
-        const branchInUse = gitWorktrees.some((wt: { ref?: string }) => wt.ref === data.ref);
-        if (branchInUse) {
-          throw new Error(
-            `Branch '${data.ref}' is already checked out by another worktree. ` +
-              `Git does not allow the same branch to be checked out in multiple worktrees. ` +
-              `Please choose a different branch or create a new branch.`
-          );
-        }
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('already checked out')) {
-          throw error;
-        }
-        // Don't block creation for transient git errors
-        console.warn(
-          `⚠️  Pre-flight branch checkout check failed (continuing anyway):`,
-          error instanceof Error ? error.message : String(error)
-        );
-      }
-    }
+    // Path existence + branch-in-use checks have moved to the executor /
+    // core git helpers — see the "filesystem preflights" note above. Both
+    // `createWorktree()` and `createBranchAsClone()` refuse to clobber an
+    // existing `targetPath` and surface that failure through
+    // `filesystem_status='failed'` on the DB row.
 
     console.log('🔍 RepoService.createWorktree - computed paths:', {
       worktreePath,
@@ -753,6 +688,9 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     // and GID is available, ensuring {{worktree.gid}} is populated in templates.
     // See: packages/executor/src/commands/git.ts:renderEnvironmentTemplates()
 
+    // Storage mode (storageMode + cloneDepth) was resolved + validated up
+    // top so the preflights could gate on it; reuse those vars below.
+
     // Create DB record EARLY with 'creating' status
     // Executor will:
     // 1. Create git worktree on filesystem
@@ -775,6 +713,8 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         ...(data.others_can ? { others_can: data.others_can } : {}),
         ...(data.others_fs_access ? { others_fs_access: data.others_fs_access } : {}),
         ...(data.environment_variant ? { environment_variant: data.environment_variant } : {}),
+        storage_mode: storageMode,
+        ...(cloneDepth !== undefined ? { clone_depth: cloneDepth } : {}),
         sessions: [],
         last_used: new Date().toISOString(),
         issue_url: data.issue_url,
@@ -928,6 +868,17 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
             // Unix group isolation (only when RBAC is enabled)
             initUnixGroup: rbacEnabled,
             othersAccess: data.others_fs_access || worktree.others_fs_access || 'read',
+            // Branch storage mode (forwarded for the clone-mode code path)
+            storageMode,
+            ...(cloneDepth !== undefined ? { cloneDepth } : {}),
+            ...(storageMode === 'clone' && repo.remote_url ? { remoteUrl: repo.remote_url } : {}),
+            // Hand the executor the per-repo base clone as a `--reference`
+            // hint. The executor checks `existsSync` on its own filesystem;
+            // missing path → silent fallback to a full clone. Lets daemon
+            // and executor live on different mounts without coupling.
+            ...(storageMode === 'clone' && repo.local_path
+              ? { referencePath: repo.local_path }
+              : {}),
           },
         },
         {
