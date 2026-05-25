@@ -1,3 +1,4 @@
+import type { ContextUsageSnapshot } from '@agor/core/types';
 import type { SessionStatus, TaskStatus } from '@agor-live/client';
 import { shortId } from '@agor-live/client';
 // TODO: Move normalization to DB or daemon API
@@ -25,7 +26,7 @@ import {
 import { Badge, Collapse, Popover, Tooltip, theme } from 'antd';
 import type React from 'react';
 import { copyToClipboard } from '../../utils/clipboard';
-import { getContextWindowPercentage } from '../../utils/contextWindow';
+import { resolveContextWindowPercentage } from '../../utils/contextWindow';
 import { parseGitStateSha } from '../../utils/gitState';
 import { type SessionForIds, SessionIdsList } from '../SessionIds';
 import { Tag } from '../Tag';
@@ -198,11 +199,7 @@ interface ContextWindowPillProps extends BasePillProps {
       costUsd?: number;
       primaryModel?: string;
       durationMs?: number;
-      contextUsageSnapshot?: {
-        totalTokens: number;
-        maxTokens: number;
-        percentage: number;
-      };
+      contextUsageSnapshot?: ContextUsageSnapshot;
     };
   };
 }
@@ -246,7 +243,8 @@ const ContextWindowPopoverContent: React.FC<{
             Percentage: <strong>{contextUsageSnapshot.percentage}%</strong>
           </div>
           <div style={{ fontSize: '0.85em', color: token.colorTextTertiary, marginTop: 4 }}>
-            Authoritative snapshot from SDK getContextUsage()
+            Authoritative snapshot reported by the agent (Claude SDK getContextUsage() or Codex CLI
+            token_count event).
           </div>
         </div>
       ),
@@ -406,9 +404,18 @@ export const ContextWindowPill: React.FC<ContextWindowPillProps> = ({
   taskMetadata,
   style,
 }) => {
-  // Handle division by zero - if no limit, show as unknown percentage
-  const percentage = limit > 0 ? Math.round(getContextWindowPercentage(used, limit)) : 0;
-  const hasLimit = limit > 0;
+  // Prefer the executor-supplied snapshot — its totalTokens/maxTokens are
+  // authoritative (agent-reported), and its `percentage` matches the agent's
+  // own "Context XX% used" display (e.g. Codex applies a baseline subtraction
+  // that does NOT equal raw `used / limit`). Fall back to the explicit
+  // used/limit props when no snapshot is available.
+  const snapshot = taskMetadata?.normalized_sdk_response?.contextUsageSnapshot;
+  const effectiveUsed = snapshot?.totalTokens ?? used;
+  const effectiveLimit = snapshot?.maxTokens ?? limit;
+  const hasLimit = effectiveLimit > 0;
+  const percentage = hasLimit
+    ? Math.round(resolveContextWindowPercentage(effectiveUsed, effectiveLimit, snapshot))
+    : 0;
 
   // Color-code based on usage: green (<50%), yellow (50-80%), red (>80%)
   const getColor = () => {
@@ -428,8 +435,8 @@ export const ContextWindowPill: React.FC<ContextWindowPillProps> = ({
     <Popover
       content={
         <ContextWindowPopoverContent
-          used={used}
-          limit={limit}
+          used={effectiveUsed}
+          limit={effectiveLimit}
           percentage={percentage}
           taskMetadata={taskMetadata}
         />

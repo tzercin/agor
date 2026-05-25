@@ -10,6 +10,7 @@ import { generateId, shortId } from '@agor/core/db';
 import { getGitState } from '@agor/core/git';
 import type {
   AgenticToolName,
+  ContextUsageSnapshot,
   MessageID,
   MessageSource,
   PermissionMode,
@@ -21,7 +22,6 @@ import type {
 import { MessageRole } from '@agor/core/types';
 import { createFeathersBackedRepositories } from '../../db/feathers-repositories.js';
 import type { StreamingCallbacks } from '../../sdk-handlers/base/types.js';
-import { computeCodexContextWindowFromPreviousTask } from '../../sdk-handlers/codex/context-window-fallback.js';
 import { normalizeRawSdkResponse } from '../../sdk-handlers/normalizer-factory.js';
 import type { AgorClient } from '../../services/feathers-client.js';
 
@@ -53,12 +53,14 @@ export interface BaseTool {
     errorDetails?: string[];
     /** Raw SDK response for token accounting - stored and normalized */
     rawSdkResponse?: unknown;
-    /** Raw SDK context usage from getContextUsage() — authoritative context window snapshot */
-    rawContextUsage?: {
-      totalTokens: number;
-      maxTokens: number;
-      percentage: number;
-    };
+    /**
+     * Authoritative context-window snapshot captured during the turn.
+     * - Claude: from the Agent SDK's `getContextUsage()` response.
+     * - Codex: from the CLI's `event_msg/token_count.last_token_usage` payload.
+     * When present, base-executor uses it as the source of truth for
+     * `Task.computed_context_window` and `normalized_sdk_response.contextUsageSnapshot`.
+     */
+    rawContextUsage?: ContextUsageSnapshot;
   }>;
 
   // Optional stopTask method for tools that support interruption
@@ -72,16 +74,12 @@ export interface BaseTool {
   }>;
 
   /**
-   * Compute cumulative context window usage for a session
+   * Fallback: compute current context-window occupancy for a session.
    *
-   * Each tool implements its own strategy:
-   * - Claude Code: Sum input+output tokens across tasks since last compaction
-   * - Codex/Gemini: May use SDK's cumulative reporting
-   *
-   * @param sessionId - Session ID to compute context for
-   * @param currentTaskId - Current task ID (optional)
-   * @param currentRawSdkResponse - Raw SDK response for current task (required during task completion)
-   * @returns Cumulative context window usage in tokens
+   * Only invoked when no authoritative `rawContextUsage` snapshot was
+   * captured during the turn. See the canonical doc on
+   * `ITool.computeContextWindow` in `sdk-handlers/base/tool.interface.ts`
+   * for the full source-precedence rules and per-tool strategy notes.
    */
   computeContextWindow?(
     sessionId: string,
@@ -445,50 +443,35 @@ export async function executeToolTask(params: {
       }
     }
 
-    // Use SDK's authoritative context usage when available,
-    // fall back to tool-specific computation otherwise.
-    // Handled independently of rawSdkResponse since the two data sources are separate.
-    if (result.rawContextUsage && result.rawContextUsage.totalTokens > 0) {
+    // Prefer the authoritative context-window snapshot when the tool surfaced
+    // one (Claude: Agent SDK getContextUsage(); Codex: CLI event_msg/token_count
+    // last_token_usage). Falls back to tool-specific computation otherwise.
+    // Handled independently of rawSdkResponse — the two data sources are separate.
+    //
+    // The `maxTokens > 0` guard (vs `totalTokens > 0`) preserves the snapshot
+    // even at the moment of auto-compaction, when `totalTokens` can legitimately
+    // be near zero.
+    if (result.rawContextUsage && result.rawContextUsage.maxTokens > 0) {
       patchData.computed_context_window = result.rawContextUsage.totalTokens;
       console.log(
-        `[${toolName}] SDK context usage: ${result.rawContextUsage.totalTokens}/${result.rawContextUsage.maxTokens} tokens (${result.rawContextUsage.percentage}%)`
+        `[${toolName}] Authoritative context snapshot: ${result.rawContextUsage.totalTokens}/${result.rawContextUsage.maxTokens} tokens (${result.rawContextUsage.percentage}%)`
       );
 
-      // Override contextWindowLimit in normalized response with the authoritative
-      // maxTokens from getContextUsage() so the UI computes percentage correctly
-      if (
-        patchData.normalized_sdk_response &&
-        typeof patchData.normalized_sdk_response === 'object' &&
-        result.rawContextUsage.maxTokens > 0
-      ) {
-        const normalizedResponse = patchData.normalized_sdk_response as Record<string, unknown>;
-        normalizedResponse.contextWindowLimit = result.rawContextUsage.maxTokens;
-        normalizedResponse.contextUsageSnapshot = {
-          totalTokens: result.rawContextUsage.totalTokens,
-          maxTokens: result.rawContextUsage.maxTokens,
-          percentage: result.rawContextUsage.percentage,
-        };
+      // Override contextWindowLimit in the normalized response with the
+      // authoritative maxTokens so the UI computes percentage against the
+      // model's actual reported window, and attach the snapshot itself so
+      // UI consumers can prefer the agent's own displayed percentage.
+      if (patchData.normalized_sdk_response) {
+        patchData.normalized_sdk_response.contextWindowLimit = result.rawContextUsage.maxTokens;
+        patchData.normalized_sdk_response.contextUsageSnapshot = result.rawContextUsage;
       }
     } else {
-      if (toolName === 'codex' && result.rawSdkResponse) {
-        try {
-          const inferredWindow = await computeCodexContextWindowFromPreviousTask(
-            client,
-            sessionId,
-            taskId,
-            result.rawSdkResponse
-          );
-          if (inferredWindow && inferredWindow > 0) {
-            patchData.computed_context_window = inferredWindow;
-            console.log(
-              `[${toolName}] Inferred context window from previous-task running totals: ${inferredWindow} tokens`
-            );
-          }
-        } catch (error) {
-          console.warn(`[${toolName}] Failed to infer context window from previous task:`, error);
-        }
-      }
-
+      // No authoritative event_msg/token_count snapshot was captured during the
+      // turn. Fall through to the tool's `computeContextWindow()` which uses a
+      // last-resort heuristic. The previous "running totals across tasks" path
+      // was removed — it relied on subtracting prior tasks' input_tokens, but
+      // each turn.completed.input_tokens already includes the full transcript,
+      // so the delta represents "new content this turn," not occupancy.
       if (patchData.computed_context_window === undefined && tool.computeContextWindow) {
         try {
           const contextWindow = await tool.computeContextWindow(
