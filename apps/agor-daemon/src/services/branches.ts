@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { analyticsLogger } from '@agor/core/analytics';
 import { ENVIRONMENT, isBranchRbacEnabled, loadConfig, PAGINATION } from '@agor/core/config';
 import {
   BoardRepository,
@@ -34,6 +35,7 @@ import { getGidFromGroupName, spawnEnvironmentCommand } from '@agor/core/unix';
 import { resolveHostIpAddress } from '@agor/core/utils/host-ip';
 import { isAllowedHealthCheckUrl } from '@agor/core/utils/url';
 import { DrizzleService } from '../adapters/drizzle';
+import { buildBranchCreatedAnalyticsProperties } from '../utils/analytics-payloads.js';
 import { ensureCanTriggerManagedEnv, ensureMinimumRole } from '../utils/authorization.js';
 import { shouldUseCloneReferencePath } from '../utils/clone-reference.js';
 import { resolveGitImpersonationForBranch } from '../utils/git-impersonation.js';
@@ -275,12 +277,22 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
       );
       const created = (await super.create(withDefaults, params)) as Branch[];
       await Promise.all(created.map((branch) => this.maybeSetBoardPrimaryAssistant(branch)));
+      for (const branch of created) {
+        this.trackBranchCreated(branch);
+      }
       return created;
     }
     const withDefaults = await this.applyBranchCreateDefaults(data);
     const created = (await super.create(withDefaults, params)) as Branch;
     await this.maybeSetBoardPrimaryAssistant(created);
+    this.trackBranchCreated(created);
     return created;
+  }
+
+  private trackBranchCreated(branch: Branch): void {
+    analyticsLogger.track('branch.created', buildBranchCreatedAnalyticsProperties(branch), {
+      userId: branch.created_by,
+    });
   }
 
   private async maybeSetBoardPrimaryAssistant(branch: Branch): Promise<void> {

@@ -6,6 +6,7 @@
  * Extracted from index.ts for maintainability.
  */
 
+import { analyticsLogger } from '@agor/core/analytics';
 import { type AgorConfig, isUnixImpersonationEnabled, type UnknownJson } from '@agor/core/config';
 import {
   ArtifactRepository,
@@ -53,6 +54,7 @@ import type {
 import { gatewayRouteHook } from './hooks/gateway-route.js';
 import type { ArtifactsService } from './services/artifacts.js';
 import type { GatewayService } from './services/gateway.js';
+import { buildSessionCreatedAnalyticsProperties } from './utils/analytics-payloads.js';
 import { applySessionConfigDefaults } from './utils/apply-session-config-defaults.js';
 import {
   ensureMinimumRole,
@@ -1885,6 +1887,15 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         },
       ],
       create: [
+        async (context) => {
+          const session = context.result as Session;
+          analyticsLogger.track(
+            'session.created',
+            buildSessionCreatedAnalyticsProperties(session),
+            { userId: session.created_by }
+          );
+          return context;
+        },
         // Claude Code CLI: register watcher + persist cli_state + dispatch
         // the Zellij tab spawn. No-op for other agentic tools.
         async (context) => {

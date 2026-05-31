@@ -5,6 +5,7 @@
  * Uses DrizzleService adapter with TaskRepository.
  */
 
+import { analyticsLogger } from '@agor/core/analytics';
 import {
   type ChildCompletionContext,
   renderChildCompletionCallback,
@@ -33,6 +34,27 @@ import type { SessionsService } from './sessions';
 /**
  * Task service params
  */
+const ANALYTICS_TERMINAL_TASK_STATUSES = new Set<Task['status']>([
+  TaskStatus.COMPLETED,
+  TaskStatus.FAILED,
+  TaskStatus.STOPPED,
+  TaskStatus.TIMED_OUT,
+]);
+
+const COMPLETION_SIDE_EFFECT_TASK_STATUSES = new Set<Task['status']>([
+  TaskStatus.COMPLETED,
+  TaskStatus.FAILED,
+  TaskStatus.STOPPED,
+]);
+
+function isAnalyticsTerminalTaskStatus(status: Task['status'] | undefined): boolean {
+  return status !== undefined && ANALYTICS_TERMINAL_TASK_STATUSES.has(status);
+}
+
+function isCompletionSideEffectTaskStatus(status: Task['status'] | undefined): boolean {
+  return status !== undefined && COMPLETION_SIDE_EFFECT_TASK_STATUSES.has(status);
+}
+
 export type TaskParams = QueryParams<{
   session_id?: string;
   status?: Task['status'];
@@ -163,7 +185,64 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       }
     }
 
+    if (!Array.isArray(result)) {
+      this.trackTaskCreated(result);
+      if (result.status === TaskStatus.RUNNING) {
+        this.trackTaskStarted(result);
+      }
+    }
+
     return result;
+  }
+
+  private baseTaskAnalyticsProperties(task: Task): Record<string, unknown> {
+    return {
+      task_id: task.task_id,
+      session_id: task.session_id,
+      status: task.status,
+      model: task.model ?? task.normalized_sdk_response?.primaryModel ?? null,
+      queue_position: task.queue_position ?? null,
+      tool_use_count: task.tool_use_count ?? 0,
+      is_callback: task.metadata?.is_agor_callback === true,
+      source: task.metadata?.source ?? null,
+    };
+  }
+
+  private trackTaskCreated(task: Task): void {
+    analyticsLogger.track('task.created', this.baseTaskAnalyticsProperties(task), {
+      userId: task.created_by,
+    });
+  }
+
+  private trackTaskStarted(task: Task): void {
+    analyticsLogger.track(
+      'task.started',
+      {
+        ...this.baseTaskAnalyticsProperties(task),
+        started_at: task.started_at ?? null,
+      },
+      { userId: task.created_by }
+    );
+  }
+
+  private trackTaskCompleted(task: Task): void {
+    const normalized = task.normalized_sdk_response;
+    analyticsLogger.track(
+      'task.completed',
+      {
+        ...this.baseTaskAnalyticsProperties(task),
+        completed_at: task.completed_at ?? null,
+        duration_ms: task.duration_ms ?? normalized?.durationMs ?? null,
+        input_tokens: normalized?.tokenUsage?.inputTokens ?? null,
+        output_tokens: normalized?.tokenUsage?.outputTokens ?? null,
+        total_tokens: normalized?.tokenUsage?.totalTokens ?? null,
+        cost_usd: normalized?.costUsd ?? null,
+        context_window_limit: normalized?.contextWindowLimit ?? null,
+        context_window_percentage: normalized?.contextUsageSnapshot?.percentage ?? null,
+        has_error: Boolean(task.error_message),
+      },
+      { userId: task.created_by }
+    );
   }
 
   async getActiveWithExecutorHeartbeat(): Promise<Task[]> {
@@ -223,64 +302,74 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
    * NOTE: Tasks are only ever patched one at a time (never in bulk), so we don't need to loop.
    */
   async patch(id: string, data: Partial<Task>, params?: TaskParams): Promise<Task | Task[]> {
+    const nextStatus = data.status;
+    const mayTransitionStatus =
+      nextStatus === TaskStatus.RUNNING || isAnalyticsTerminalTaskStatus(nextStatus);
+    const currentTask = mayTransitionStatus ? await this.get(id, params) : undefined;
+    const isAnalyticsTerminalTransition =
+      isAnalyticsTerminalTaskStatus(nextStatus) &&
+      !isAnalyticsTerminalTaskStatus(currentTask?.status);
+    const isCompletionSideEffectTransition =
+      isCompletionSideEffectTaskStatus(nextStatus) &&
+      !isCompletionSideEffectTaskStatus(currentTask?.status);
+    const isRunningTransition =
+      nextStatus === TaskStatus.RUNNING && currentTask?.status !== TaskStatus.RUNNING;
+
     // When transitioning to a terminal status, auto-compute duration, completed_at,
     // and end_timestamp. This ensures ALL code paths (complete, fail, stop handler)
     // get correct timing data without duplicating logic.
-    const isTerminalTransition =
-      data.status === TaskStatus.COMPLETED ||
-      data.status === TaskStatus.FAILED ||
-      data.status === TaskStatus.STOPPED;
+    if (isAnalyticsTerminalTransition && currentTask) {
+      const completedAt = data.completed_at || new Date().toISOString();
 
-    if (isTerminalTransition) {
-      // Only fetch the current task if we actually need to compute something
-      const currentTask = await this.get(id, params);
+      // Ensure completed_at is always set
+      if (!data.completed_at) {
+        data.completed_at = completedAt;
+      }
 
-      // Guard: skip if task is already in a terminal state (e.g. adding a report
-      // after completion). We only compute timing on the actual transition.
-      const wasAlreadyTerminal =
-        currentTask?.status === TaskStatus.COMPLETED ||
-        currentTask?.status === TaskStatus.FAILED ||
-        currentTask?.status === TaskStatus.STOPPED;
-
-      if (!wasAlreadyTerminal) {
-        const completedAt = data.completed_at || new Date().toISOString();
-
-        // Ensure completed_at is always set
-        if (!data.completed_at) {
-          data.completed_at = completedAt;
+      // Compute duration_ms if not explicitly provided (null check, not falsy,
+      // so an explicit 0 is preserved)
+      if (data.duration_ms == null) {
+        const startTime =
+          currentTask.started_at ||
+          currentTask.message_range?.start_timestamp ||
+          currentTask.created_at;
+        if (startTime) {
+          data.duration_ms = Math.max(
+            0,
+            new Date(completedAt).getTime() - new Date(startTime).getTime()
+          );
         }
+      }
 
-        // Compute duration_ms if not explicitly provided (null check, not falsy,
-        // so an explicit 0 is preserved)
-        if (data.duration_ms == null) {
-          const startTime =
-            currentTask?.started_at ||
-            currentTask?.message_range?.start_timestamp ||
-            currentTask?.created_at;
-          if (startTime) {
-            data.duration_ms = Math.max(
-              0,
-              new Date(completedAt).getTime() - new Date(startTime).getTime()
-            );
-          }
-        }
-
-        // Set end_timestamp if not already meaningfully set
-        const endTs = currentTask?.message_range?.end_timestamp;
-        const startTs = currentTask?.message_range?.start_timestamp;
-        if (currentTask?.message_range && (!endTs || endTs === startTs)) {
-          data.message_range = {
-            ...currentTask.message_range,
-            ...data.message_range,
-            end_timestamp: completedAt,
-          };
-        }
+      // Set end_timestamp if not already meaningfully set
+      const endTs = currentTask.message_range?.end_timestamp;
+      const startTs = currentTask.message_range?.start_timestamp;
+      if (currentTask.message_range && (!endTs || endTs === startTs)) {
+        data.message_range = {
+          ...currentTask.message_range,
+          ...data.message_range,
+          end_timestamp: completedAt,
+        };
       }
     }
 
     const result = await super.patch(id, data, params);
 
+    if (isRunningTransition && !Array.isArray(result)) {
+      this.trackTaskStarted(result as Task);
+    }
+
     if (data.last_executor_heartbeat_at && !Array.isArray(result)) {
+      analyticsLogger.track(
+        'executor.heartbeat',
+        {
+          task_id: (result as Task).task_id,
+          session_id: (result as Task).session_id,
+          status: (result as Task).status,
+          last_executor_heartbeat_at: data.last_executor_heartbeat_at,
+        },
+        { userId: (result as Task).created_by }
+      );
       this.handleExecutorHeartbeat(result as Task, data.last_executor_heartbeat_at).catch(
         (error) => {
           console.warn(
@@ -291,12 +380,17 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       );
     }
 
-    // If task is being marked as completed, failed, or stopped (terminal status)
-    if (
-      data.status === TaskStatus.COMPLETED ||
-      data.status === TaskStatus.FAILED ||
-      data.status === TaskStatus.STOPPED
-    ) {
+    // Emit analytics for terminal task transitions, including timeouts that do not
+    // run the broader task-completion side effects below.
+    if (isAnalyticsTerminalTransition) {
+      const task = result as Task;
+      this.trackTaskCompleted(task);
+    }
+
+    // Run completion side effects only for statuses that historically completed
+    // executor turns. Timeout paths patch session state separately and should not
+    // enqueue callbacks, mark sessions idle, archive forks, or drain queues here.
+    if (isCompletionSideEffectTransition) {
       // Since tasks are patched one at a time, result is always a single Task (not an array)
       const task = result as Task;
 
@@ -343,7 +437,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
           // For STOPPED tasks: The stop endpoint directly patches session → IDLE with
           // ready_for_prompt=false. Skip the session update here to avoid racing with it.
           //
-          // For COMPLETED/FAILED tasks: Normal completion - set ready_for_prompt=true
+          // For other terminal tasks: Normal completion - set ready_for_prompt=true
           // to allow auto-queue-processing of any pending messages.
           const isUserInitiatedStop = data.status === TaskStatus.STOPPED;
 

@@ -16,6 +16,7 @@
 import 'dotenv/config';
 
 // Patch console methods to respect LOG_LEVEL env var
+import { configureAnalyticsLogger } from '@agor/core/analytics';
 import { patchConsole } from '@agor/core/utils/logger';
 import { UI_MOUNT_PATH } from '@agor/core/utils/url';
 
@@ -164,6 +165,10 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
       '🔒 Agor git hardening disabled (override: []); inherited GIT_CONFIG_PARAMETERS preserved'
     );
   }
+
+  // Configure analytics after process-wide git hardening is installed. Module
+  // plugins are optional dynamic imports and must never prevent daemon startup.
+  await configureAnalyticsLogger(config);
 
   // Surface a clear migration note if the config still carries leftover
   // anonymous-mode keys. Operators upgrading from a release that had
