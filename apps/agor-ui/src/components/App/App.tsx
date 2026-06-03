@@ -30,6 +30,7 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from 'react-resizable-panels';
+import { useParams } from 'react-router-dom';
 import { mapToArray } from '@/utils/mapHelpers';
 import { AppActionsProvider } from '../../contexts/AppActionsContext';
 import { AppEntityDataProvider, AppLiveDataProvider } from '../../contexts/AppDataContext';
@@ -49,6 +50,7 @@ import { buildAssistantBootstrapPrompt } from '../../utils/assistantBootstrapPro
 import { createAssistantBranch } from '../../utils/assistantCreation';
 import { initializeAudioOnInteraction } from '../../utils/audio';
 import { useThemedMessage } from '../../utils/message';
+import { hasExplicitEntityRouteTarget } from '../../utils/routeTargets';
 import { startAssistantBootstrapSession } from '../../utils/startAssistantBootstrapSession';
 import { AppHeader } from '../AppHeader';
 import type { BoardAssistantPanelTab } from '../BoardAssistantPanel';
@@ -68,6 +70,7 @@ import { SessionSettingsModal } from '../SessionSettingsModal';
 import { SettingsModal, UserSettingsModal } from '../SettingsModal';
 import { TerminalModal, WEB_TERMINAL_MIN_ROLE } from '../TerminalModal';
 import { ThemeEditorModal } from '../ThemeEditorModal';
+import { getPrimaryAssistantSessionToRestore } from './primaryAssistantRestore';
 
 const { Content } = Layout;
 
@@ -277,6 +280,12 @@ export const App: React.FC<AppProps> = ({
   webTerminalEnabled = false,
 }) => {
   const { showWarning } = useThemedMessage();
+  const routeParams = useParams<{
+    sessionShortId?: string;
+    branchShortId?: string;
+    artifactShortId?: string;
+  }>();
+  const hasExplicitEntityTarget = hasExplicitEntityRouteTarget(routeParams);
   const sessionCanvasRef = useRef<SessionCanvasRef>(null);
   const [newSessionBranchId, setNewSessionBranchId] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -347,6 +356,7 @@ export const App: React.FC<AppProps> = ({
   // Props take precedence for backward compatibility with onboarding flow
   const settingsOpen = settingsRouteOpen || !!openSettingsTab;
   const effectiveSettingsTab = openSettingsTab || settingsRouteSection;
+  const shouldAutoRestorePrimaryAssistant = !settingsRouteOpen && !hasExplicitEntityTarget;
 
   // Handle external user settings modal control (e.g., from onboarding "Configure API Keys")
   const effectiveUserSettingsOpen = userSettingsOpen || !!openUserSettings;
@@ -805,20 +815,26 @@ export const App: React.FC<AppProps> = ({
   const primaryAssistantInaccessible = Boolean(primaryAssistantId && !primaryAssistantBranch);
 
   useEffect(() => {
-    if (!currentBoard || !primaryAssistantBranch || effectiveSelectedSessionId) return;
-    if (autoOpenedAssistantBoardRef.current === currentBoard.board_id) return;
-    const latestSession = (sessionsByBranch.get(primaryAssistantBranch.branch_id) || [])
-      .filter((session) => !session.archived)
-      .sort((a, b) => new Date(b.last_updated).getTime() - new Date(a.last_updated).getTime())[0];
-    if (latestSession) {
+    const latestSessionId = getPrimaryAssistantSessionToRestore({
+      currentBoardId: currentBoard?.board_id,
+      primaryAssistantBranchId: primaryAssistantBranch?.branch_id,
+      effectiveSelectedSessionId,
+      autoOpenedAssistantBoardId: autoOpenedAssistantBoardRef.current,
+      restoreAllowed: shouldAutoRestorePrimaryAssistant,
+      sessions: primaryAssistantBranch
+        ? sessionsByBranch.get(primaryAssistantBranch.branch_id) || []
+        : [],
+    });
+    if (latestSessionId && currentBoard) {
       autoOpenedAssistantBoardRef.current = currentBoard.board_id;
-      navigation.goToSession(latestSession.session_id);
+      navigation.goToSession(latestSessionId);
     }
   }, [
     currentBoard,
     primaryAssistantBranch,
     sessionsByBranch,
     effectiveSelectedSessionId,
+    shouldAutoRestorePrimaryAssistant,
     navigation,
   ]);
 
