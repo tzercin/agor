@@ -1459,7 +1459,7 @@ const SessionCanvas = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             const branchUpdates: Array<{
               branch_id: string;
               position: { x: number; y: number };
-              zone_id?: string;
+              zone_id?: string | null;
             }> = [];
             const zoneUpdates: Record<string, { x: number; y: number }> = {};
             const markdownUpdates: Record<string, { x: number; y: number }> = {};
@@ -1561,12 +1561,14 @@ const SessionCanvas = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 // Find existing board_object for this card
                 const existingBoardObject = boardObjectByCard.get(cardId);
                 if (existingBoardObject) {
-                  const updateData: { position: { x: number; y: number }; zone_id?: string } = {
+                  // zone_id: null clears zone membership; string sets it
+                  const updateData: {
+                    position: { x: number; y: number };
+                    zone_id?: string | null;
+                  } = {
                     position: positionToStore,
+                    zone_id: droppedZoneId ?? null,
                   };
-                  if (droppedZoneId !== undefined) {
-                    updateData.zone_id = droppedZoneId;
-                  }
                   await client
                     .service('board-objects')
                     .patch(existingBoardObject.object_id, updateData);
@@ -1621,11 +1623,11 @@ const SessionCanvas = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
                 const positionToStore = calculateStoragePosition(absolutePosition, newParent);
 
-                // Branch moved - update board_object position (and zone_id if dropped on zone)
+                // Branch moved - update board_object position (null clears zone, string sets it)
                 branchUpdates.push({
                   branch_id: nodeId,
                   position: positionToStore,
-                  zone_id: droppedZoneId,
+                  zone_id: droppedZoneId ?? null,
                 });
 
                 if (zoneCollision) {
@@ -1675,13 +1677,14 @@ const SessionCanvas = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
                 if (existingBoardObject) {
                   // Update existing board_object (position and zone_id)
-                  const updateData: { position: { x: number; y: number }; zone_id?: string } = {
+                  // zone_id: null clears zone membership; string sets it
+                  const updateData: {
+                    position: { x: number; y: number };
+                    zone_id?: string | null;
+                  } = {
                     position,
+                    zone_id,
                   };
-                  // Only update zone_id if it's defined (dropped on zone) or explicitly undefined (moved off zone)
-                  if (zone_id !== undefined) {
-                    updateData.zone_id = zone_id;
-                  }
                   await client
                     .service('board-objects')
                     .patch(existingBoardObject.object_id, updateData);
