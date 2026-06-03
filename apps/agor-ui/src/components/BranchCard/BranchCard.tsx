@@ -11,18 +11,21 @@ import {
 } from '@ant-design/icons';
 import { Button, Card, Space, Spin, Tooltip, Typography, theme } from 'antd';
 import { AggregationColor } from 'antd/es/color-picker/color';
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
+import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { ensureColorVisible, isDarkTheme } from '../../utils/theme';
 import { ArchiveDeleteBranchModal } from '../ArchiveDeleteBranchModal';
 import { EnvironmentPill } from '../EnvironmentPill';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { CreatedByTag } from '../metadata';
 import { IssuePill, PullRequestPill } from '../Pill';
+import { BranchSessionPeekSection } from './BranchSessionPeekSection';
 import { BranchSessionSections } from './BranchSessionSections';
 
 const _BRANCH_CARD_MAX_WIDTH = 600;
 const NOTES_MAX_LENGTH = 200; // Character limit for truncated notes
+const PEEK_SESSIONS_STORAGE_KEY_PREFIX = 'agor:branch-card:peeked-session-ids:';
 
 interface BranchCardProps {
   branch: Branch;
@@ -104,9 +107,73 @@ const BranchCardComponent = ({
 
   // Notes expansion state
   const [notesExpanded, setNotesExpanded] = useState(false);
+  const [storedPeekedSessionIds, setStoredPeekedSessionIds] = useLocalStorage<string[]>(
+    `${PEEK_SESSIONS_STORAGE_KEY_PREFIX}${branch.branch_id}`,
+    []
+  );
+
+  const peekableSessions = useMemo(
+    () => sessions.filter((session) => !session.archived),
+    [sessions]
+  );
+  const peekableSessionById = useMemo(
+    () =>
+      new Map<string, Session>(peekableSessions.map((session) => [session.session_id, session])),
+    [peekableSessions]
+  );
+
+  const peekedSessionIds = useMemo(() => {
+    if (inPopover || panelMode) return [];
+
+    const resolvedIds: string[] = [];
+    const seen = new Set<string>();
+
+    for (const rawToken of storedPeekedSessionIds) {
+      const token = rawToken.trim();
+      if (!token) continue;
+
+      const session = peekableSessions.find((candidate) => candidate.session_id === token);
+      if (session && !seen.has(session.session_id)) {
+        resolvedIds.push(session.session_id);
+        seen.add(session.session_id);
+      }
+    }
+
+    return resolvedIds;
+  }, [inPopover, panelMode, peekableSessions, storedPeekedSessionIds]);
+
+  const peekedSessionIdSet = useMemo(() => new Set(peekedSessionIds), [peekedSessionIds]);
+  const peekedSessions = useMemo(
+    () =>
+      peekedSessionIds
+        .map((sessionId) => peekableSessionById.get(sessionId))
+        .filter((session): session is Session => !!session),
+    [peekableSessionById, peekedSessionIds]
+  );
+
+  const updatePeekedSessionIds = useCallback(
+    (nextSessionIds: string[]) => setStoredPeekedSessionIds(nextSessionIds),
+    [setStoredPeekedSessionIds]
+  );
+
+  useEffect(() => {
+    if (inPopover || panelMode) return;
+    if (storedPeekedSessionIds.join('|') === peekedSessionIds.join('|')) return;
+    setStoredPeekedSessionIds(peekedSessionIds);
+  }, [inPopover, panelMode, peekedSessionIds, setStoredPeekedSessionIds, storedPeekedSessionIds]);
+
+  const handleTogglePeekSession = useCallback(
+    (sessionId: string) => {
+      const next = peekedSessionIdSet.has(sessionId)
+        ? peekedSessionIds.filter((peekedSessionId) => peekedSessionId !== sessionId)
+        : [...peekedSessionIds, sessionId];
+      updatePeekedSessionIds(next);
+    },
+    [peekedSessionIdSet, peekedSessionIds, updatePeekedSessionIds]
+  );
 
   // Filter out archived sessions from board card display
-  const activeSessions = useMemo(() => sessions.filter((s) => !s.archived), [sessions]);
+  const activeSessions = peekableSessions;
 
   // Check if any active (non-archived) session is running or stopping
   const hasRunningSession = useMemo(
@@ -232,7 +299,7 @@ const BranchCardComponent = ({
   return (
     <Card
       style={{
-        width: panelMode ? '100%' : 500,
+        width: panelMode ? '100%' : peekedSessions.length > 0 ? 880 : 500,
         cursor: 'default', // Override React Flow's drag cursor - only drag handles should show grab cursor
         transition:
           'box-shadow 0.6s ease-in-out, outline 0.2s ease-in-out, border 0.6s ease-in-out, opacity 0.2s ease-in-out',
@@ -495,11 +562,24 @@ const BranchCardComponent = ({
           onForkSession={onForkSession}
           onSpawnSession={onSpawnSession}
           onOpenSessionSettings={onOpenSessionSettings}
+          peekedSessionIds={peekedSessionIdSet}
+          onTogglePeekSession={!inPopover && !panelMode ? handleTogglePeekSession : undefined}
           defaultExpanded={defaultExpanded}
           mode="card"
           client={client}
         />
       </div>
+
+      {!inPopover && !panelMode && peekedSessions.length > 0 && (
+        <BranchSessionPeekSection
+          client={client}
+          sessions={peekedSessions}
+          userById={userById}
+          currentUserId={currentUserId}
+          branchName={branch.name}
+          onCloseSession={handleTogglePeekSession}
+        />
+      )}
 
       {/* Archive/Delete Modal */}
       <ArchiveDeleteBranchModal

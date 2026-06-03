@@ -5,6 +5,7 @@ import {
 } from '@agor-live/client';
 import {
   ClockCircleOutlined,
+  EyeOutlined,
   InboxOutlined,
   MessageOutlined,
   PlusOutlined,
@@ -49,6 +50,8 @@ export interface BranchSessionSectionsProps {
   onForkSession?: (sessionId: string, prompt: string) => Promise<void>;
   onSpawnSession?: (sessionId: string, config: string | Partial<SpawnConfig>) => Promise<void>;
   onOpenSessionSettings?: (sessionId: string) => void;
+  peekedSessionIds?: Set<string>;
+  onTogglePeekSession?: (sessionId: string) => void;
   defaultExpanded?: boolean;
   mode?: BranchSessionSectionsMode;
   client: AgorClient | null;
@@ -58,10 +61,20 @@ export interface BranchSessionSectionsProps {
 const SessionItemWithActions: React.FC<{
   sessionId: string;
   isArchiving: boolean;
+  isPeeked?: boolean;
   onArchive: (sessionId: string, e: React.MouseEvent) => void;
   onSettings?: (sessionId: string, e: React.MouseEvent) => void;
+  onTogglePeek?: (sessionId: string, e: React.MouseEvent) => void;
   children: React.ReactNode;
-}> = ({ sessionId, isArchiving, onArchive, onSettings, children }) => {
+}> = ({
+  sessionId,
+  isArchiving,
+  isPeeked = false,
+  onArchive,
+  onSettings,
+  onTogglePeek,
+  children,
+}) => {
   const [hovered, setHovered] = useState(false);
   const { token } = theme.useToken();
 
@@ -75,6 +88,13 @@ const SessionItemWithActions: React.FC<{
     alignItems: 'center',
     justifyContent: 'center',
   };
+  const peekButtonStyle: React.CSSProperties = isPeeked
+    ? {
+        ...buttonStyle,
+        color: token.colorPrimary,
+        background: token.colorPrimaryBg,
+      }
+    : buttonStyle;
 
   return (
     <div
@@ -108,6 +128,17 @@ const SessionItemWithActions: React.FC<{
             />
           </Tooltip>
         )}
+        {onTogglePeek && (
+          <Tooltip title={isPeeked ? 'Stop peeking at latest prompt' : 'Peek at latest prompt'}>
+            <Button
+              type="text"
+              size="small"
+              icon={<EyeOutlined />}
+              onClick={(e) => onTogglePeek(sessionId, e)}
+              style={peekButtonStyle}
+            />
+          </Tooltip>
+        )}
         <Tooltip title="Archive session">
           <Button
             type="text"
@@ -134,6 +165,8 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
   onForkSession,
   onSpawnSession,
   onOpenSessionSettings,
+  peekedSessionIds,
+  onTogglePeekSession,
   defaultExpanded = true,
   mode = 'card',
   client,
@@ -159,6 +192,15 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
   const [archivingSessionIds, setArchivingSessionIds] = useState<Set<string>>(new Set());
 
   const isPanel = mode === 'panel';
+  const peekedIds = peekedSessionIds ?? new Set<string>();
+
+  const handleTogglePeekSession = useCallback(
+    (sessionId: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      onTogglePeekSession?.(sessionId);
+    },
+    [onTogglePeekSession]
+  );
 
   const handleForkSpawnConfirm = async (config: string | Partial<SpawnConfig>) => {
     if (!forkSpawnModal.session) return;
@@ -284,7 +326,9 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
       <SessionItemWithActions
         sessionId={session.session_id}
         isArchiving={archivingSessionIds.has(session.session_id)}
+        isPeeked={peekedIds.has(session.session_id)}
         onArchive={handleArchiveSession}
+        onTogglePeek={onTogglePeekSession ? handleTogglePeekSession : undefined}
         onSettings={
           onOpenSessionSettings
             ? (id, e) => {
@@ -326,12 +370,14 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
   const sessionListContent = (
     <ConfigProvider theme={{ components: { Tree: { colorBgContainer: 'transparent' } } }}>
       <Tree
+        className="agor-flat-tree"
         treeData={sessionTreeData}
         expandedKeys={expandedKeys}
         onExpand={(keys) => setExpandedKeys(keys as React.Key[])}
         showLine
         showIcon={false}
         selectable={false}
+        style={{ background: 'transparent', borderRadius: 0, padding: 0 }}
         titleRender={renderSessionNode}
       />
     </ConfigProvider>
@@ -405,7 +451,9 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
             key={session.session_id}
             sessionId={session.session_id}
             isArchiving={archivingSessionIds.has(session.session_id)}
+            isPeeked={peekedIds.has(session.session_id)}
             onArchive={handleArchiveSession}
+            onTogglePeek={onTogglePeekSession ? handleTogglePeekSession : undefined}
             onSettings={
               onOpenSessionSettings
                 ? (id, e) => {
@@ -476,7 +524,9 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
             key={session.session_id}
             sessionId={session.session_id}
             isArchiving={archivingSessionIds.has(session.session_id)}
+            isPeeked={peekedIds.has(session.session_id)}
             onArchive={handleArchiveSession}
+            onTogglePeek={onTogglePeekSession ? handleTogglePeekSession : undefined}
             onSettings={
               onOpenSessionSettings
                 ? (id, e) => {
