@@ -181,6 +181,58 @@ export function getKnowledgeUrl(
 // ---------------------------------------------------------------------------
 
 /**
+ * Replace URL userinfo with `<redacted>` for logs/errors.
+ *
+ * This is intentionally string-based rather than `new URL(...)` only:
+ * defensive redaction has to work even when a user pasted a malformed URL
+ * such as one with an unescaped `@` inside the password. The userinfo match is
+ * greedy within the URL authority, so it redacts through the last `@` before a
+ * path/query/hash delimiter.
+ *
+ * SCP-like Git remotes (`git@host:org/repo.git`) do not contain `://`, so they
+ * are left untouched.
+ */
+export function redactUrlUserinfo(input: string): string {
+  return input.replace(
+    /([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/?#\s]*@)([^/?#\s]+)/g,
+    (_match, prefix: string, _userinfo: string, host: string) => `${prefix}<redacted>@${host}`
+  );
+}
+
+/** True when an HTTP(S) URL embeds URL userinfo (`https://USER[:PASS]@host/...`). */
+export function httpUrlHasUserinfo(rawUrl: string): boolean {
+  if (!/^https?:\/\//i.test(rawUrl)) return false;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    return parsed.username.length > 0 || parsed.password.length > 0;
+  } catch {
+    return /^https?:\/\/[^/?#\s]*@[^/?#\s]+/i.test(rawUrl);
+  }
+}
+
+/**
+ * Remove userinfo from HTTP(S) URLs. Non-HTTP(S) URLs, including SSH Git
+ * remotes like `ssh://git@host/org/repo.git`, are returned unchanged because
+ * their userinfo position may be a legitimate login name rather than a secret.
+ */
+export function stripHttpUrlUserinfo(rawUrl: string): string {
+  if (!/^https?:\/\//i.test(rawUrl)) return rawUrl;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return rawUrl;
+    if (parsed.username || parsed.password) {
+      parsed.username = '';
+      parsed.password = '';
+      return parsed.toString();
+    }
+    return rawUrl;
+  } catch {
+    return rawUrl.replace(/^(https?:\/\/)([^/?#\s]*@)([^/?#\s]+)/i, '$1$3');
+  }
+}
+
+/**
  * Normalize an optional HTTP(S) URL string.
  *
  * - Trims whitespace
