@@ -36,6 +36,10 @@ export interface KnowledgeNamespaceGraphRequest {
   namespace?: string;
   namespace_id?: string;
   edge_types?: KnowledgeGraphEdgeType[];
+  include_my_drafts?: boolean;
+  includeMyDrafts?: boolean;
+  include_other_user_drafts?: boolean;
+  includeOtherUserDrafts?: boolean;
 }
 
 export type KnowledgeGraphParams = QueryParams<
@@ -88,7 +92,13 @@ export class KnowledgeGraphService {
       return { namespace_id: null, nodes: [], edges: [] };
     }
 
-    const docs = await this.documents.findAll({ namespace_id: namespace.namespace_id });
+    const docs = await this.documents.findAll({
+      namespace_id: namespace.namespace_id,
+      include_my_drafts: request.include_my_drafts ?? request.includeMyDrafts ?? true,
+      include_other_user_drafts:
+        request.include_other_user_drafts ?? request.includeOtherUserDrafts ?? false,
+      draft_filter_user_id: user?.user_id as UserID | undefined,
+    });
     const readable = docs.filter((doc) => this.canRead(doc, user));
     const readableIds = new Set<string>(readable.map((doc) => doc.document_id));
 
@@ -99,6 +109,7 @@ export class KnowledgeGraphService {
       uri: doc.uri,
       kind: doc.kind,
       visibility: doc.visibility,
+      status: doc.status,
     }));
 
     const rawEdges = await this.graph.documentEdgesForNamespace({
@@ -210,8 +221,9 @@ export class KnowledgeGraphService {
     const path = ref.path ?? parsed?.path;
     if (!namespaceSlug || !path) return null;
 
-    const docs = await this.documents.findAll({ namespace_slug: namespaceSlug, path });
-    return this.activeDocument(docs[0] ?? null);
+    return this.activeDocument(
+      await this.documents.findByNamespaceSlugAndPath(namespaceSlug, path)
+    );
   }
 
   private async assertCanLinkRef(ref: KnowledgeNodeRef, user?: User): Promise<void> {
@@ -235,11 +247,9 @@ export class KnowledgeGraphService {
     if (unitId) return this.activeDocument(await this.documents.findByUnitId(unitId));
     const parsed = parseKnowledgeUri(node.uri);
     if (!parsed) return null;
-    const docs = await this.documents.findAll({
-      namespace_slug: parsed.namespace_slug,
-      path: parsed.path,
-    });
-    return this.activeDocument(docs[0] ?? null);
+    return this.activeDocument(
+      await this.documents.findByNamespaceSlugAndPath(parsed.namespace_slug, parsed.path)
+    );
   }
 
   private async canReadNode(node: KnowledgeGraphNode, user?: User): Promise<boolean> {

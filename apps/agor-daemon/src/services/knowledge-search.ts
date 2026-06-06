@@ -8,6 +8,7 @@ import {
   type Database,
   executeRaw,
   isPostgresDatabase,
+  KnowledgeDocumentRepository,
   type KnowledgeSearchQuery,
   KnowledgeSearchRepository,
   sql,
@@ -42,11 +43,13 @@ export type KnowledgeSearchParams = QueryParams<KnowledgeSearchQuery> & Authenti
 
 export class KnowledgeSearchService {
   private repo: KnowledgeSearchRepository;
+  private documents: KnowledgeDocumentRepository;
   private variables: AppVariableRepository;
   private embeddingProvider = new OpenAIEmbeddingProvider();
 
   constructor(private db: Database) {
     this.repo = new KnowledgeSearchRepository(db);
+    this.documents = new KnowledgeDocumentRepository(db);
     this.variables = new AppVariableRepository(db);
   }
 
@@ -74,11 +77,18 @@ export class KnowledgeSearchService {
   private scopedQuery(query: KnowledgeSearchQuery | undefined, user?: User): KnowledgeSearchQuery {
     this.assertSupportedMode(query);
     const isAdmin = hasMinimumRole(user?.role, ROLES.ADMIN);
+    const rawQuery = (query ?? {}) as KnowledgeSearchQuery & {
+      includeMyDrafts?: boolean;
+      includeOtherUserDrafts?: boolean;
+    };
     return {
       ...(query ?? {}),
-      include_archived: isAdmin && query?.include_archived === true,
+      include_archived: isAdmin && rawQuery.include_archived === true,
+      include_my_drafts: rawQuery.include_my_drafts ?? rawQuery.includeMyDrafts ?? true,
+      include_other_user_drafts:
+        rawQuery.include_other_user_drafts ?? rawQuery.includeOtherUserDrafts ?? false,
       readable_as_admin: isAdmin,
-      readable_by_user_id: isAdmin ? undefined : user?.user_id,
+      readable_by_user_id: user?.user_id,
     };
   }
 
@@ -95,6 +105,20 @@ export class KnowledgeSearchService {
       throw new BadRequest('Knowledge semantic min_similarity must be a number between 0 and 1');
     }
     return parsed;
+  }
+
+  private async attachIndexingToResults<T extends KnowledgeSearchResult>(
+    results: T[],
+    query: KnowledgeSearchQuery
+  ): Promise<T[]> {
+    if (query.include_indexing !== true && query.includeIndexing !== true) return results;
+    const docsWithIndexing = (await this.documents.attachIndexingStatus(
+      results.map((result) => result.document)
+    )) as T['document'][];
+    return results.map((result, index) => ({
+      ...result,
+      document: docsWithIndexing[index],
+    }));
   }
 
   private async semanticSearch(
@@ -154,6 +178,8 @@ export class KnowledgeSearchService {
       ? normalizeKnowledgePath(rawQuery.path_prefix)
       : null;
     const minSimilarity = this.parseMinSimilarity(rawQuery.min_similarity);
+    const includeMyDrafts = rawQuery.include_my_drafts !== false;
+    const includeOtherUserDrafts = rawQuery.include_other_user_drafts === true;
 
     const baseUrl = await getBaseUrl();
     const result = await executeRaw(
@@ -166,6 +192,7 @@ export class KnowledgeSearchService {
           d.title,
           d.kind,
           d.visibility,
+          d.status,
           d.edit_policy,
           d.current_version_id,
           d.metadata AS document_metadata,
@@ -206,7 +233,13 @@ export class KnowledgeSearchService {
           AND (${pathPrefix}::text IS NULL OR d.path = ${pathPrefix} OR d.path LIKE (${pathPrefix} || '/%'))
           AND (${rawQuery.kind ?? null}::text IS NULL OR d.kind = ${rawQuery.kind ?? null})
           AND (${rawQuery.visibility ?? null}::text IS NULL OR d.visibility = ${rawQuery.visibility ?? null})
+          AND (${rawQuery.status ?? null}::text IS NULL OR d.status = ${rawQuery.status ?? null})
           AND (${isAdmin}::boolean = true OR d.visibility = 'public' OR d.created_by = ${user?.user_id ?? null})
+          AND (
+            ${includeOtherUserDrafts}::boolean = true
+            OR d.status = 'published'
+            OR (${includeMyDrafts}::boolean = true AND d.created_by = ${user?.user_id ?? null})
+          )
           AND (${minSimilarity}::float IS NULL OR (1 - ((e.embedding::vector(1536)) <=> ${vector}::vector(1536))) >= ${minSimilarity})
         ORDER BY (e.embedding::vector(1536)) <=> ${vector}::vector(1536)
         LIMIT ${limit}`
@@ -248,6 +281,7 @@ export class KnowledgeSearchService {
           title: String(row.title),
           kind: row.kind as never,
           visibility: row.visibility as never,
+          status: (row.status as never) ?? 'published',
           edit_policy: row.edit_policy as never,
           current_version_id: (row.current_version_id as never) ?? null,
           metadata: (row.document_metadata as Record<string, unknown> | null) ?? null,
@@ -284,7 +318,8 @@ export class KnowledgeSearchService {
         chunks: [chunk],
       });
     }
-    return [...byDoc.values()].slice(0, rawQuery.limit ?? 25);
+    const values = [...byDoc.values()].slice(0, rawQuery.limit ?? 25);
+    return this.attachIndexingToResults(values, rawQuery);
   }
 
   private hybridMerge(
@@ -316,11 +351,12 @@ export class KnowledgeSearchService {
     const textResults = (await this.repo.search({ ...query, mode: 'text' })).filter((result) =>
       this.canRead(result, user)
     );
+    const textResultsWithIndexing = await this.attachIndexingToResults(textResults, query);
     if (query.mode === 'hybrid') {
       const semanticResults = await this.semanticSearch(query, user);
-      return this.hybridMerge(textResults, semanticResults).slice(0, query.limit ?? 25);
+      return this.hybridMerge(textResultsWithIndexing, semanticResults).slice(0, query.limit ?? 25);
     }
-    return textResults;
+    return textResultsWithIndexing;
   }
 
   async create(data: KnowledgeSearchQuery, params?: KnowledgeSearchParams) {
@@ -331,11 +367,12 @@ export class KnowledgeSearchService {
     const textResults = (await this.repo.search({ ...query, mode: 'text' })).filter((result) =>
       this.canRead(result, user)
     );
+    const textResultsWithIndexing = await this.attachIndexingToResults(textResults, query);
     if (query.mode === 'hybrid') {
       const semanticResults = await this.semanticSearch(query, user);
-      return this.hybridMerge(textResults, semanticResults).slice(0, query.limit ?? 25);
+      return this.hybridMerge(textResultsWithIndexing, semanticResults).slice(0, query.limit ?? 25);
     }
-    return textResults;
+    return textResultsWithIndexing;
   }
 }
 

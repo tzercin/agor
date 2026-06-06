@@ -3,7 +3,9 @@ import type {
   KnowledgeIndexingStatus as CoreKnowledgeIndexingStatus,
   KnowledgeNamespace as CoreKnowledgeNamespace,
   KnowledgeDocumentVersion as CoreKnowledgeVersion,
+  KnowledgeDocumentIndexingStatus,
   KnowledgeDocumentKind,
+  KnowledgeDocumentStatus,
   KnowledgeNamespaceGraph,
   KnowledgeSearchMode,
   KnowledgeSemanticSettingsPublic,
@@ -22,18 +24,21 @@ import {
   ArrowLeftOutlined,
   DownOutlined,
   EditOutlined,
+  ExperimentOutlined,
   FileAddOutlined,
   FileOutlined,
   FolderAddOutlined,
   FolderOpenOutlined,
   FolderOutlined,
   HistoryOutlined,
+  LoadingOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
   SaveOutlined,
   SearchOutlined,
   SettingOutlined,
   UpOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import {
   Alert,
@@ -167,6 +172,111 @@ const kindLabels: Record<KnowledgeDocumentKind, string> = {
   bundle: 'Bundle',
   external: 'Reference',
 };
+
+const indexingStateMeta: Record<
+  KnowledgeDocumentIndexingStatus['state'],
+  { label: string; color: string; tooltip: string }
+> = {
+  empty: {
+    label: 'No semantic index',
+    color: 'default',
+    tooltip: 'No indexable units exist for the current version yet.',
+  },
+  not_configured: {
+    label: 'Semantic indexing unavailable',
+    color: 'default',
+    tooltip: 'Semantic indexing is not configured for these chunks.',
+  },
+  queued: {
+    label: 'Indexing',
+    color: '#1677ff',
+    tooltip: 'Some chunks are queued for semantic indexing.',
+  },
+  ready: {
+    label: 'Semantic index ready',
+    color: '#52c41a',
+    tooltip: 'Current chunks are available for semantic search.',
+  },
+  stale: {
+    label: 'Needs semantic refresh',
+    color: '#faad14',
+    tooltip: 'Some chunks are stale and need semantic index refresh.',
+  },
+  error: {
+    label: 'Semantic index error',
+    color: '#ff4d4f',
+    tooltip: 'At least one chunk failed semantic indexing.',
+  },
+  mixed: {
+    label: 'Partial semantic index',
+    color: '#1677ff',
+    tooltip: 'Chunks have mixed semantic indexing states.',
+  },
+};
+
+const indexingChunkLabels: Record<string, string> = {
+  not_configured: 'not configured',
+  pending: 'queued',
+  ready: 'ready',
+  stale: 'stale',
+  error: 'error',
+};
+
+function indexingTooltip(status: KnowledgeDocumentIndexingStatus): string {
+  const counts = Object.entries(status.chunks)
+    .filter(([, count]) => Number(count) > 0)
+    .map(([state, count]) => `${indexingChunkLabels[state] ?? state}: ${count}`)
+    .join(', ');
+  const model = status.embedding_model ? ` · ${status.embedding_model}` : '';
+  const queue = status.queue_depth > 0 ? ` · queue ${status.queue_depth}` : '';
+  const error = status.last_error ? ` · ${status.last_error}` : '';
+  return `${indexingStateMeta[status.state].tooltip}${model}${queue}${counts ? ` · ${counts}` : ''}${error}`;
+}
+
+function shouldShowIndexingCue(status?: KnowledgeDocumentIndexingStatus | null): boolean {
+  return Boolean(status && status.state !== 'empty' && status.state !== 'not_configured');
+}
+
+function IndexingStatusCue({
+  status,
+  size = 14,
+}: {
+  status?: KnowledgeDocumentIndexingStatus | null;
+  size?: number;
+}) {
+  if (!shouldShowIndexingCue(status) || !status) return null;
+
+  const meta = indexingStateMeta[status.state];
+  const iconStyle = { color: meta.color, fontSize: size };
+  const icon =
+    status.state === 'queued' ? (
+      <LoadingOutlined spin style={iconStyle} />
+    ) : status.state === 'error' ? (
+      <WarningOutlined style={iconStyle} />
+    ) : (
+      <ExperimentOutlined style={iconStyle} />
+    );
+
+  return (
+    <Tooltip title={indexingTooltip(status)}>
+      <span
+        aria-label={meta.label}
+        role="img"
+        style={{
+          alignItems: 'center',
+          display: 'inline-flex',
+          flex: '0 0 auto',
+          height: size + 2,
+          justifyContent: 'center',
+          lineHeight: 1,
+          width: size + 2,
+        }}
+      >
+        {icon}
+      </span>
+    </Tooltip>
+  );
+}
 
 const kindForSegment = (segment: string): KnowledgeDocumentKind | undefined => {
   if (segment === 'Pages') return 'doc';
@@ -378,6 +488,7 @@ export function KnowledgePage({
   ]);
   const [titleDraft, setTitleDraft] = useState('');
   const [visibilityDraft, setVisibilityDraft] = useState<KnowledgeDocument['visibility']>('public');
+  const [statusDraft, setStatusDraft] = useState<KnowledgeDocumentStatus>('published');
   const [kindDraft, setKindDraft] = useState<KnowledgeDocumentKind>('doc');
   const [titleFromContent, setTitleFromContent] = useState(false);
   const [markdownDraft, setMarkdownDraft] = useState(DEFAULT_MARKDOWN);
@@ -637,6 +748,7 @@ export function KnowledgePage({
           (markdownDraft !== savedMarkdown ||
             titleDraft !== activeDoc.title ||
             visibilityDraft !== activeDoc.visibility ||
+            statusDraft !== activeDoc.status ||
             kindDraft !== activeDoc.kind ||
             titleFromContent !== (activeDoc.metadata?.title_from_content === true) ||
             renamePathOnTitleChange))
@@ -704,6 +816,7 @@ export function KnowledgePage({
             kind,
             limit: 50,
             mode: searchMode,
+            include_indexing: true,
           },
         });
         const rows = normalizeFindResult<KnowledgeSearchResult>(result as KnowledgeSearchResult[]);
@@ -714,6 +827,7 @@ export function KnowledgePage({
             namespace_slug: namespaceFilter,
             kind,
             archived: false,
+            include_indexing: true,
           },
         });
         setDocuments(normalizeFindResult<KnowledgeDocument>(result as KnowledgeDocument[]));
@@ -928,6 +1042,45 @@ export function KnowledgePage({
   }, [activeDocId, documents, namespaceSlugForDocument, routeDocumentPath, routeNamespaceSlug]);
 
   useEffect(() => {
+    if (!client || loading || activeDocIdRef.current === DRAFT_DOCUMENT_ID) return;
+    if (!routeNamespaceSlug || !routeDocumentPath) return;
+    const routedDocument = documents.find(
+      (doc) =>
+        doc.path === routeDocumentPath && namespaceSlugForDocument(doc) === routeNamespaceSlug
+    );
+    if (routedDocument) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await client.service('kb/documents').find({
+          query: {
+            namespace_slug: routeNamespaceSlug,
+            path: routeDocumentPath,
+            archived: false,
+            include_other_user_drafts: true,
+            include_indexing: true,
+          },
+        });
+        if (cancelled) return;
+        const [directDoc] = normalizeFindResult<KnowledgeDocument>(result as KnowledgeDocument[]);
+        if (!directDoc) return;
+        setDocuments((prev) =>
+          prev.some((doc) => doc.document_id === directDoc.document_id)
+            ? prev
+            : [directDoc, ...prev]
+        );
+        activeDocIdRef.current = directDoc.document_id;
+        setActiveDocId(directDoc.document_id);
+      } catch (err) {
+        if (!cancelled) console.error('Failed to load direct Knowledge document:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, documents, loading, namespaceSlugForDocument, routeDocumentPath, routeNamespaceSlug]);
+
+  useEffect(() => {
     if (activeDocIdRef.current === DRAFT_DOCUMENT_ID) return;
     if (activeDocId && !activeDoc && !loading) {
       activeDocIdRef.current = null;
@@ -940,6 +1093,7 @@ export function KnowledgePage({
       setSelectedFolder(parentFolderForPath(activeDoc.path));
       setTitleDraft(activeDoc.title);
       setVisibilityDraft(activeDoc.visibility);
+      setStatusDraft(activeDoc.status ?? 'published');
       setKindDraft(activeDoc.kind);
       setTitleFromContent(activeDoc.metadata?.title_from_content === true);
       setRenamePathOnTitleChange(false);
@@ -1061,6 +1215,7 @@ export function KnowledgePage({
       title,
       kind: 'doc',
       visibility: namespace?.visibility_default ?? 'public',
+      status: 'published',
       edit_policy: 'owner',
       current_version_id: null,
       metadata: { title_from_content: true },
@@ -1078,6 +1233,7 @@ export function KnowledgePage({
     setSelectedFolder(ROOT_FOLDER);
     setTitleDraft(title);
     setVisibilityDraft(draft.visibility);
+    setStatusDraft(draft.status);
     setKindDraft(draft.kind);
     setTitleFromContent(true);
     setRenamePathOnTitleChange(false);
@@ -1154,6 +1310,7 @@ export function KnowledgePage({
           namespaces.find((ns) => ns.slug === namespaceSlug)?.visibility_default ??
           selectedNamespace?.visibility_default ??
           'public',
+        status: 'published',
         metadata: { title_from_content: true },
         content_text: `# ${title}\n\nWrite markdown here.\n`,
         change_summary: 'Initial version',
@@ -1192,6 +1349,7 @@ export function KnowledgePage({
           title: nextTitle,
           kind: kindDraft,
           visibility: visibilityDraft,
+          status: statusDraft,
           metadata: {
             ...(activeDoc.metadata ?? {}),
             title_from_content: titleFromContent,
@@ -1226,6 +1384,7 @@ export function KnowledgePage({
       const updated = (await client.service('kb/documents').patch(activeDoc.document_id, {
         title: nextTitle,
         visibility: visibilityDraft,
+        status: statusDraft,
         kind: kindDraft,
         ...(nextPath ? { path: nextPath } : {}),
         content_text: markdownDraft,
@@ -1498,6 +1657,7 @@ export function KnowledgePage({
         <FileOutlined style={{ color: token.colorTextTertiary, fontSize: 13 }} />
         <span
           style={{
+            flex: 1,
             minWidth: 0,
             overflow: 'hidden',
             textOverflow: 'ellipsis',
@@ -1507,6 +1667,16 @@ export function KnowledgePage({
         >
           {doc.title}
         </span>
+        {doc.status === 'draft' && (
+          <Tag
+            color="gold"
+            bordered={false}
+            style={{ marginInlineEnd: 0, fontSize: 10, lineHeight: '16px' }}
+          >
+            Draft
+          </Tag>
+        )}
+        <IndexingStatusCue status={doc.indexing_status} />
       </button>
     );
   };
@@ -1922,6 +2092,24 @@ export function KnowledgePage({
                           {activeDoc.visibility}
                         </Tag>
                       )}
+                      {isEditing ? (
+                        <Select
+                          size="small"
+                          value={statusDraft}
+                          disabled={!canManageActiveVisibility}
+                          onChange={setStatusDraft}
+                          style={{ width: 118 }}
+                          options={[
+                            { label: 'Published', value: 'published' },
+                            { label: 'Draft', value: 'draft' },
+                          ]}
+                        />
+                      ) : activeDoc.status === 'draft' ? (
+                        <Tag color="gold">Draft</Tag>
+                      ) : (
+                        <Tag color="blue">Published</Tag>
+                      )}
+                      <IndexingStatusCue status={activeDoc.indexing_status} size={16} />
                       {isEditing ? (
                         <Select
                           size="small"

@@ -56,9 +56,16 @@ export type KnowledgeDocumentParams = QueryParams<{
   path?: string;
   kind?: KnowledgeDocument['kind'];
   visibility?: KnowledgeDocument['visibility'];
+  status?: KnowledgeDocument['status'];
   archived?: boolean;
+  include_my_drafts?: boolean;
+  includeMyDrafts?: boolean;
+  include_other_user_drafts?: boolean;
+  includeOtherUserDrafts?: boolean;
   include_content?: boolean;
   include_links?: boolean;
+  include_indexing?: boolean;
+  includeIndexing?: boolean;
   version?: string | number;
 }> &
   AuthenticatedParams;
@@ -82,6 +89,8 @@ type KnowledgeDocumentRef = {
   path?: string;
   include_content?: boolean;
   include_links?: boolean;
+  include_indexing?: boolean;
+  includeIndexing?: boolean;
   version?: string | number;
 };
 
@@ -93,7 +102,10 @@ type HydratedKnowledgeDocument = KnowledgeDocument & {
   links?: unknown[];
 };
 
-type HydrateOptions = Pick<KnowledgeDocumentRef, 'include_content' | 'include_links' | 'version'>;
+type HydrateOptions = Pick<
+  KnowledgeDocumentRef,
+  'include_content' | 'include_links' | 'include_indexing' | 'includeIndexing' | 'version'
+>;
 
 function wantsFirstLineTitle(data: KnowledgeDocumentWriteData): boolean {
   if (typeof data.first_line_is_title === 'boolean') return data.first_line_is_title;
@@ -164,10 +176,11 @@ export class KnowledgeDocumentsService extends DrizzleService<
       data.visibility !== undefined && data.visibility !== existing.visibility;
     const editPolicyChanged =
       data.edit_policy !== undefined && data.edit_policy !== existing.edit_policy;
-    if (!visibilityChanged && !editPolicyChanged) return;
+    const statusChanged = data.status !== undefined && data.status !== existing.status;
+    if (!visibilityChanged && !editPolicyChanged && !statusChanged) return;
     if (!this.canManageDocument(existing, user)) {
       throw new Forbidden(
-        'Only the owner or an admin can change knowledge document visibility or edit policy'
+        'Only the owner or an admin can change knowledge document visibility, lifecycle status, or edit policy'
       );
     }
   }
@@ -340,14 +353,18 @@ export class KnowledgeDocumentsService extends DrizzleService<
     document: KnowledgeDocument,
     params?: HydrateOptions
   ): Promise<KnowledgeDocument | HydratedKnowledgeDocument> {
-    if (params?.include_content !== true && params?.include_links !== true) return document;
+    const withIndexing =
+      params?.include_indexing === true || params?.includeIndexing === true
+        ? ((await this.repo.attachIndexingStatus(document)) as KnowledgeDocument)
+        : document;
+    if (params?.include_content !== true && params?.include_links !== true) return withIndexing;
     const version = await this.versionFor(document, params?.version);
     return {
-      ...document,
-      document,
+      ...withIndexing,
+      document: withIndexing,
       current_version: version,
       content: version?.content_text ?? null,
-      first_line_is_title: document.metadata?.title_from_content === true,
+      first_line_is_title: withIndexing.metadata?.title_from_content === true,
       ...(params?.include_links
         ? { links: extractKnowledgeLinks(version?.content_text ?? '') }
         : {}),
@@ -381,12 +398,24 @@ export class KnowledgeDocumentsService extends DrizzleService<
           path: query.path,
           kind: query.kind,
           visibility: query.visibility,
+          status: query.status,
           archived: isAdmin ? query.archived : false,
+          include_my_drafts: query.include_my_drafts ?? query.includeMyDrafts ?? true,
+          include_other_user_drafts:
+            query.include_other_user_drafts ?? query.includeOtherUserDrafts ?? false,
+          draft_filter_user_id: user?.user_id as UserID | undefined,
         }
-      : undefined;
+      : {
+          include_my_drafts: true,
+          include_other_user_drafts: false,
+          draft_filter_user_id: user?.user_id as UserID | undefined,
+        };
     const rows = await this.repo.findAll(filters);
     const readable = rows.filter((doc) => this.canRead(doc, user));
     if (params?.query?.include_content !== true && params?.query?.include_links !== true) {
+      if (params?.query?.include_indexing === true || params?.query?.includeIndexing === true) {
+        return this.repo.attachIndexingStatus(readable) as Promise<KnowledgeDocument[]>;
+      }
       return readable;
     }
     return Promise.all(
@@ -394,6 +423,8 @@ export class KnowledgeDocumentsService extends DrizzleService<
         this.hydrateDocument(doc, {
           include_content: params?.query?.include_content,
           include_links: params?.query?.include_links,
+          include_indexing: params?.query?.include_indexing,
+          includeIndexing: params?.query?.includeIndexing,
           version: params?.query?.version,
         })
       )
