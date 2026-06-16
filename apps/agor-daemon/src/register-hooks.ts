@@ -17,6 +17,7 @@ import {
 } from '@agor/core/config';
 import {
   ArtifactRepository,
+  BoardObjectRepository,
   BoardRepository,
   type BranchRepository,
   type Database,
@@ -67,6 +68,7 @@ import type {
 } from './declarations.js';
 import { gatewayRouteHook } from './hooks/gateway-route.js';
 import type { ArtifactsService } from './services/artifacts.js';
+import { normalizeBoardObjectFindQuery } from './services/board-objects.js';
 import type { GatewayService } from './services/gateway.js';
 import { groupMembershipsHooks, groupsHooks } from './services/groups.js';
 import { isLocalAuthenticationLookup } from './services/users.js';
@@ -477,6 +479,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // ============================================================================
   // Board objects hooks
   // ============================================================================
+  const boardObjectRepository = new BoardObjectRepository(db);
 
   safeService('board-objects')?.hooks({
     before: {
@@ -485,12 +488,55 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         requireAuth,
         requireMinimumRole(ROLES.MEMBER, 'manage board objects'),
       ],
-      // NOTE: We deliberately do NOT add scopeFindToAccessibleBranches here.
+      // NOTE: We deliberately do NOT add the generic scopeFindToAccessibleBranches here.
       // Board-objects may reference `branch_id` (branch cards) OR `card_id`
       // (kanban cards with no branch) OR neither (zones, layout objects).
-      // The before-hook would filter out rows with null branch_id, breaking
-      // card-only boards. Access control lives in the after-hook below, which
-      // correctly preserves card/zone rows while scoping branch-bound ones.
+      // That generic hook would filter out rows with null branch_id, breaking
+      // card-only boards. The RBAC find hook below uses a board-object-specific
+      // SQL query that preserves card/zone rows while scoping branch-bound ones.
+      find: [
+        ...(branchRbacEnabled
+          ? [
+              async (context: HookContext) => {
+                if (!context.params.provider) return context;
+
+                const userId = context.params.user?.user_id as
+                  | import('@agor/core/types').UUID
+                  | undefined;
+                const normalized = normalizeBoardObjectFindQuery(context.params.query);
+
+                if (!userId) {
+                  context.result = {
+                    total: 0,
+                    limit: normalized.limit,
+                    skip: normalized.skip,
+                    data: [],
+                  };
+                  return context;
+                }
+
+                const [total, data] = await Promise.all([
+                  boardObjectRepository.countVisibleToUser(userId, normalized.filters),
+                  boardObjectRepository.findVisibleToUser(
+                    userId,
+                    normalized.filters,
+                    normalized.pagination
+                  ),
+                ]);
+
+                context.result = {
+                  total,
+                  limit: normalized.limit,
+                  skip: normalized.skip,
+                  data,
+                };
+                (context.params as { _boardObjectsRbacScoped?: boolean })._boardObjectsRbacScoped =
+                  true;
+                return context;
+              },
+            ]
+          : []),
+      ],
     },
     after: {
       find: [
@@ -498,6 +544,12 @@ export function registerHooks(ctx: RegisterHooksContext): void {
           ? [
               // Filter board-objects based on branch access permissions
               async (context: HookContext) => {
+                if (
+                  (context.params as { _boardObjectsRbacScoped?: boolean })._boardObjectsRbacScoped
+                ) {
+                  return context;
+                }
+
                 // Skip for internal calls
                 if (!context.params.provider) {
                   return context;
