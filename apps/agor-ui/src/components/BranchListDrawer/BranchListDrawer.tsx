@@ -16,6 +16,7 @@ import {
 import { getSessionStatusTone, type StatusTone } from '../../utils/sessionStatus';
 import { getSessionDisplayTitle } from '../../utils/sessionTitle';
 import { formatRelativeTime, formatTimestampWithRelative } from '../../utils/time';
+import { BranchBoardLocatorIcon } from '../BranchBoardLocatorIcon';
 import { HighlightMatch } from '../HighlightMatch';
 import { BranchPill } from '../Pill';
 import { SessionRelationshipIcon } from '../SessionRelationshipIcon';
@@ -253,6 +254,7 @@ export const BoardSessionList: React.FC<BoardSessionListProps> = ({
                     <HighlightMatch text={titleText} query={trimmedQuery} />
                   </Typography.Text>
                   <SessionRelationshipIcon session={session} />
+                  <BranchBoardLocatorIcon branch={branch} />
                 </div>
 
                 {toolMatches && (
