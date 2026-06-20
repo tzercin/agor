@@ -88,6 +88,19 @@ export type SessionParams = QueryParams<{
     _include_last_message?: boolean | 'true' | 'false';
   };
 
+const remoteRelationshipsEnrichedResults = new WeakSet<object>();
+
+export function markRemoteRelationshipsEnrichedResult<T extends object>(result: T): T {
+  remoteRelationshipsEnrichedResults.add(result);
+  return result;
+}
+
+export function isRemoteRelationshipsEnrichedResult(result: unknown): boolean {
+  return (
+    typeof result === 'object' && result !== null && remoteRelationshipsEnrichedResults.has(result)
+  );
+}
+
 /**
  * Execute task data payload
  * Used by setExecuteHandler, executeTask, and related methods
@@ -136,7 +149,7 @@ export class SessionsService extends DrizzleService<Session, Partial<Session>, S
     this.usersRepo = new UsersRepository(db);
   }
 
-  private async enrichRemoteRelationships(sessionList: Session[]): Promise<Session[]> {
+  async enrichRemoteRelationships(sessionList: Session[]): Promise<Session[]> {
     const sessionIds = sessionList.map((session) => session.session_id);
     if (sessionIds.length === 0) return sessionList;
 
@@ -799,13 +812,15 @@ export class SessionsService extends DrizzleService<Session, Partial<Session>, S
     const result = await super.find(params);
 
     if (Array.isArray(result)) {
-      return this.enrichRemoteRelationships(result);
+      const enriched = await this.enrichRemoteRelationships(result);
+      return markRemoteRelationshipsEnrichedResult(enriched);
     }
 
-    return {
+    const enrichedData = await this.enrichRemoteRelationships(result.data);
+    return markRemoteRelationshipsEnrichedResult({
       ...result,
-      data: await this.enrichRemoteRelationships(result.data),
-    };
+      data: enrichedData,
+    });
   }
 }
 

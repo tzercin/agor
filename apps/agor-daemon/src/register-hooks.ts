@@ -71,6 +71,10 @@ import type { ArtifactsService } from './services/artifacts.js';
 import { normalizeBoardObjectFindQuery } from './services/board-objects.js';
 import type { GatewayService } from './services/gateway.js';
 import { groupMembershipsHooks, groupsHooks } from './services/groups.js';
+import {
+  isRemoteRelationshipsEnrichedResult,
+  markRemoteRelationshipsEnrichedResult,
+} from './services/sessions.js';
 import { isLocalAuthenticationLookup } from './services/users.js';
 import { buildSessionCreatedAnalyticsProperties } from './utils/analytics-payloads.js';
 import { applySessionConfigDefaults } from './utils/apply-session-config-defaults.js';
@@ -308,6 +312,24 @@ export function shouldDrainQueueAfterSessionPostTurnPatch(
     session.ready_for_prompt === true &&
     !isTerminalQueueProcessingSuppressed(params)
   );
+}
+
+export async function enrichSessionFindResultWithRemoteRelationships(
+  result: Paginated<Session> | Session[],
+  sessionsService: Pick<SessionsServiceImpl, 'enrichRemoteRelationships'>
+): Promise<Paginated<Session> | Session[]> {
+  if (isRemoteRelationshipsEnrichedResult(result)) return result;
+
+  if (Array.isArray(result)) {
+    return markRemoteRelationshipsEnrichedResult(
+      await sessionsService.enrichRemoteRelationships(result)
+    );
+  }
+
+  return markRemoteRelationshipsEnrichedResult({
+    ...result,
+    data: await sessionsService.enrichRemoteRelationships(result.data),
+  });
 }
 
 /**
@@ -2209,6 +2231,19 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       ],
     },
     after: {
+      find: [
+        async (context) => {
+          // In RBAC mode, scopeSessionQuery() resolves the paginated result in
+          // before.find for SQL-efficient access control. That intentionally
+          // short-circuits SessionsService.find(), so enrich list payloads here
+          // as a single batched query over the final page.
+          context.result = await enrichSessionFindResultWithRemoteRelationships(
+            context.result as Paginated<Session> | Session[],
+            sessionsService
+          );
+          return context;
+        },
+      ],
       get: [
         async (context) => {
           // Attach an MCP token for fetched session (cached/reused when still valid).
