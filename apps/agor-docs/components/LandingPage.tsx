@@ -52,7 +52,7 @@ const productPreviews = [
   {
     title: 'Spatial boards',
     body: 'Arrange branches, zones, sessions, and teammates on one spatial canvas for agentic workflows.',
-    image: '/screenshots/board.png',
+    image: '/screenshots/board-hero.png',
     href: '/guide/boards',
   },
   {
@@ -70,7 +70,7 @@ const productPreviews = [
   {
     title: 'Message gateway',
     body: 'Bring agents into Slack, GitHub, and the threads where your team already coordinates work.',
-    image: '/screenshots/subsession-spawn-codex-review.png',
+    image: '/screenshots/marketing/agor-marketing-slack-thread.png',
     href: '/guide/message-gateway',
   },
   {
@@ -105,6 +105,19 @@ const productPreviews = [
   },
 ];
 
+// Harnesses with an executor handler in packages/executor/src/sdk-handlers.
+// Logos mirror the in-app ToolIcon set (apps/agor-ui/src/assets/tools), copied
+// into this app's public/tools. Cursor is in beta and has no logo asset yet —
+// it falls back to its ⌘ glyph until one lands.
+const harnesses: Array<{ name: string; logo?: string; glyph?: string; beta?: boolean }> = [
+  { name: 'Claude Code', logo: '/tools/claude-code.png' },
+  { name: 'Codex', logo: '/tools/codex.png' },
+  { name: 'Gemini', logo: '/tools/gemini.png' },
+  { name: 'Copilot', logo: '/tools/copilot.png' },
+  { name: 'OpenCode', logo: '/tools/opencode.png' },
+  { name: 'Cursor', logo: '/tools/cursor.png', beta: true },
+];
+
 const trustItems = [
   {
     label: 'Open source & self-hosted',
@@ -113,12 +126,12 @@ const trustItems = [
   },
   {
     label: 'No frontier lock-in',
-    body: 'Claude Code, Codex, Gemini, OpenCode — pick the best harness per session.',
+    body: 'Claude Code, Codex, Gemini, Copilot, OpenCode. Pick the best harness per session, on your own provider subscription.',
     href: '/guide/sdk-comparison',
   },
   {
     label: 'MCP-native',
-    body: 'Anything you can do, an agent can do too — over Agor’s own MCP server.',
+    body: 'Anything you can do, an agent can do too, over Agor’s own MCP server.',
     href: '/guide/internal-mcp',
   },
   {
@@ -151,9 +164,38 @@ function ProductMockup() {
         {/* biome-ignore lint/performance/noImgElement: Static product screenshot */}
         <img
           src="/screenshots/board-hero.png"
-          alt="Agor board showing colorful zones and branch cards on a shared canvas"
+          alt="Agor board showing live cursors, rich branch cards, zones, and agent dashboards"
         />
       </div>
+    </div>
+  );
+}
+
+function MultiplayerCollage() {
+  return (
+    <div
+      className={styles.socialCollage}
+      role="img"
+      aria-label="Agor multiplayer presence with facepile, board comments, and live collaboration"
+    >
+      {/* biome-ignore lint/performance/noImgElement: Static product screenshot collage */}
+      <img
+        className={styles.socialMain}
+        src="/screenshots/marketing/agor-marketing-social-comment-context.png"
+        alt="Board comment attached to an active Agor branch card"
+      />
+      {/* biome-ignore lint/performance/noImgElement: Static product screenshot collage */}
+      <img
+        className={styles.socialFacepile}
+        src="/screenshots/marketing/agor-marketing-facepile-tooltip.png"
+        alt="Agor facepile with overflow and active teammate tooltip"
+      />
+      {/* biome-ignore lint/performance/noImgElement: Static product screenshot collage */}
+      <img
+        className={styles.socialCursor}
+        src="/screenshots/marketing/agor-marketing-cursor-indicator.png"
+        alt="Live cursor indicator showing Mina on the board"
+      />
     </div>
   );
 }
@@ -203,17 +245,12 @@ export function LandingPage() {
       <section className={styles.heroSection}>
         <div className={styles.heroGrid}>
           <div className={styles.heroCopy} data-reveal>
-            <div className={styles.brandMark}>
-              {/* biome-ignore lint/performance/noImgElement: Static docs asset */}
-              <img src={LOGO_PATH} alt={`${BRAND_NAME} logo`} />
-              <span>agor</span>
-            </div>
             <p className={styles.kicker}>Team command center for all things agentic.</p>
             <h1>Meet your team of AI assistants.</h1>
             <p className={styles.heroProvocation}>
               Break out of the terminal.
               <br />
-              Bring the team and agents together.
+              Bring your team and agents together.
             </p>
             <div className={styles.heroActions}>
               <Link
@@ -237,6 +274,9 @@ export function LandingPage() {
                 View GitHub
               </Link>
             </div>
+            <p className={styles.heroMeta}>
+              Open source. Try it today with a 3-minute local install.
+            </p>
           </div>
           <div data-reveal style={revealDelay(1)}>
             <ProductMockup />
@@ -244,10 +284,34 @@ export function LandingPage() {
         </div>
       </section>
 
+      <section className={styles.harnessStrip} data-reveal>
+        <span className={styles.harnessLabel}>Built on the harnesses you already use</span>
+        <ul className={styles.harnessList}>
+          {harnesses.map((harness) => (
+            <li className={styles.harnessItem} key={harness.name}>
+              <span className={styles.harnessLogo}>
+                {harness.logo ? (
+                  // biome-ignore lint/performance/noImgElement: Static brand logo
+                  <img src={harness.logo} alt={`${harness.name} logo`} />
+                ) : (
+                  <span className={styles.harnessGlyph}>{harness.glyph}</span>
+                )}
+              </span>
+              <span className={styles.harnessName}>{harness.name}</span>
+              {harness.beta ? <span className={styles.harnessBeta}>Beta</span> : null}
+            </li>
+          ))}
+        </ul>
+        <p className={styles.harnessNote}>
+          Bring your own provider and subscription. Pick the best harness per session, no lock-in.
+          All in a web workspace that leaves the terminal behind.
+        </p>
+      </section>
+
       <section className={styles.liveSection} data-reveal>
         <div className={styles.liveCopy}>
           <span className={styles.eyebrow}>Multiplayer by default</span>
-          <h2>Your team’s agents, live on a Figma-like canvas.</h2>
+          <h2>Your team’s agents on one live, Figma-like canvas.</h2>
           <p>
             Most agent tools are solo. Agor isn’t. Cursors, comments, and a facepile show who’s
             here. Sessions, dev environments, and branches are shared. One link, one running thing,
@@ -257,8 +321,7 @@ export function LandingPage() {
             <li>
               <strong>Live presence</strong>
               <span>
-                See teammates’ cursors, comments, and reactions as work happens — not after the
-                fact.
+                See teammates’ cursors, comments, and reactions as work happens, not after the fact.
               </span>
             </li>
             <li>
@@ -281,18 +344,14 @@ export function LandingPage() {
           </Link>
         </div>
         <div className={styles.liveVisual}>
-          {/* biome-ignore lint/performance/noImgElement: Static product screenshot (interim — needs a bespoke presence/cursors shot before launch) */}
-          <img
-            src="/screenshots/cards-hero.png"
-            alt="Agor board with branches and sessions organized in shared zones"
-          />
+          <MultiplayerCollage />
         </div>
       </section>
 
       <section className={styles.productShowcase} data-reveal>
         <div className={styles.sectionHeader}>
           <span className={styles.eyebrow}>Product surfaces</span>
-          <h2>This product is much bigger than a chat window.</h2>
+          <h2>So much more than a chat box.</h2>
         </div>
         <div className={styles.productGrid}>
           {productPreviews.map((preview, index) => (
@@ -321,7 +380,7 @@ export function LandingPage() {
           <p>
             One-off prompts don’t compound. In Agor, assistants have durable identities your team
             can teach conversationally, then equip with memory, tools, channels, and schedules as
-            they grow — so what works for one person finally reaches the whole team.
+            they grow, so what works for one person finally reaches the whole team.
           </p>
         </div>
         <div className={styles.featureGrid}>
@@ -400,6 +459,9 @@ export function LandingPage() {
           <div>
             <strong>agor</strong>
             <p>Team command center for all things agentic.</p>
+            <p className={styles.footerEtymology}>
+              <span>AG</span>ent <span>OR</span>chestration
+            </p>
           </div>
         </div>
         <div className={styles.footerLinks}>

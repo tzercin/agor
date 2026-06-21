@@ -105,8 +105,8 @@ Everything else builds on these. **[Read the Features Overview →](https://agor
 ## Screenshots
 
 <div align="center">
-  <img src="https://github.com/preset-io/agor/releases/download/v0.7.9/hero.png" alt="Agor Board" style="width: 100%; border-radius: 8px; margin-bottom: 24px;" />
-  <p style="opacity: 0.5;"><em>Multiplayer spatial canvas with zones, branches, and real-time collaboration</em></p>
+  <img src="https://github.com/preset-io/agor/releases/download/v0.15.0/board-hero.png" alt="Agor Board" style="width: 100%; border-radius: 8px; margin-bottom: 24px;" />
+  <p style="opacity: 0.5;"><em>Multiplayer canvas with live cursors, rich branch cards, zones, and interactive agent dashboards</em></p>
 </div>
 
 <div align="center">
@@ -133,7 +133,7 @@ Everything else builds on these. **[Read the Features Overview →](https://agor
     </tr>
     <tr>
       <td width="50%">
-        <img src="https://github.com/preset-io/agor/releases/download/v0.3.15/env_configuration.png" alt="Environment Configuration"/>
+        <img src="https://github.com/preset-io/agor/releases/download/v0.15.0/env_configuration.png" alt="Environment Configuration"/>
         <p align="center"><em style="opacity: 0.5;">Branch environment setup</em></p>
       </td>
       <td width="50%">

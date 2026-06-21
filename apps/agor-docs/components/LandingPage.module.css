@@ -112,7 +112,7 @@
   color: var(--landing-ink);
   font-size: clamp(1.18rem, 1.8vw, 1.55rem);
   font-weight: 620;
-  line-height: 1.42;
+  line-height: 1.62;
   letter-spacing: -0.025em;
 }
 
@@ -122,6 +122,122 @@
   gap: 14px;
   align-items: center;
   margin-top: 34px;
+}
+
+.footerEtymology {
+  margin: 6px 0 0;
+  color: var(--landing-muted);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.footerEtymology span {
+  color: var(--landing-teal);
+  font-weight: 800;
+}
+
+.heroMeta {
+  margin: 18px 0 0;
+  color: var(--landing-muted);
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.harnessStrip {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 4px 28px 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  text-align: center;
+}
+
+.harnessLabel {
+  color: var(--landing-teal);
+  background: var(--landing-eyebrow-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.harnessList {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.harnessItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 6px 18px 6px 7px;
+  border: 1px solid var(--landing-line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--landing-ink);
+}
+
+.harnessLogo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 5px;
+  border-radius: 50%;
+  background: #000;
+  flex-shrink: 0;
+}
+
+.harnessLogo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.harnessGlyph {
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--landing-ink);
+}
+
+.harnessName {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.harnessBeta {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(127, 232, 223, 0.14);
+  color: var(--landing-teal);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.harnessNote {
+  max-width: 560px;
+  margin: 0;
+  color: var(--landing-muted);
+  font-size: 0.98rem;
+  line-height: 1.5;
 }
 
 .primaryButton,
@@ -199,7 +315,7 @@
   top: 70px;
   left: -18px;
   width: min(760px, 124%);
-  aspect-ratio: 2340 / 1334;
+  aspect-ratio: 3384 / 1978;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 10px;
   overflow: hidden;
@@ -486,17 +602,48 @@
   overflow: hidden;
   border: 1px solid var(--landing-line);
   border-radius: 16px;
-  background: rgba(8, 14, 24, 0.78);
+  background:
+    radial-gradient(circle at 18% 18%, rgba(127, 232, 223, 0.18), transparent 22rem),
+    radial-gradient(circle at 90% 16%, rgba(241, 39, 17, 0.22), transparent 18rem),
+    rgba(8, 14, 24, 0.78);
   box-shadow: 0 32px 84px rgba(0, 0, 0, 0.44);
 }
 
-.liveVisual img {
+.socialCollage {
+  position: relative;
+  min-height: 520px;
+  padding: 24px;
+}
+
+.socialCollage img {
+  position: absolute;
   display: block;
-  width: 100%;
-  aspect-ratio: 16 / 10;
-  object-fit: cover;
-  object-position: 50% 0;
-  filter: saturate(1.04) brightness(1.04);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 18px;
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.45);
+  filter: saturate(1.06) brightness(1.04);
+}
+
+.socialMain {
+  z-index: 2;
+  top: 190px;
+  left: 54px;
+  width: 78%;
+}
+
+.socialFacepile {
+  z-index: 3;
+  top: 32px;
+  right: 32px;
+  width: 48%;
+  border-radius: 14px;
+}
+
+.socialCursor {
+  z-index: 4;
+  top: 34px;
+  left: 30px;
+  width: 31%;
 }
 
 .landingFooter {
@@ -604,8 +751,12 @@
   }
 
   .liveVisual {
-    max-width: 520px;
+    max-width: 620px;
     max-height: none;
+  }
+
+  .socialCollage {
+    min-height: 480px;
   }
 
   .landingFooter {
@@ -685,6 +836,29 @@
 
   .mainScreenshotFrame img {
     object-position: center;
+  }
+
+  .socialCollage {
+    min-height: 430px;
+    padding: 18px;
+  }
+
+  .socialMain {
+    top: 168px;
+    left: 18px;
+    width: 84%;
+  }
+
+  .socialFacepile {
+    top: 18px;
+    right: 14px;
+    width: 58%;
+  }
+
+  .socialCursor {
+    top: 26px;
+    left: 12px;
+    width: 36%;
   }
 
   .featureGrid,
