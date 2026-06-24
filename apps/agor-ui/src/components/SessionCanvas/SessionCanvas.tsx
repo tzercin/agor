@@ -1397,7 +1397,11 @@ const SessionCanvas = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
         changes.forEach((change: any) => {
           if (change.type === 'dimensions' && change.dimensions) {
-            const node = nodes.find((n) => n.id === change.id);
+            // O(1) lookup against React Flow's internal node map. Avoids both the
+            // old per-event `nodes.find()` scan AND a per-nodes-change Map rebuild:
+            // `getNode` is a stable reference and only runs inside this dimensions
+            // branch, so the hot drag/position path does zero O(n) work.
+            const node = reactFlowInstanceRef.current?.getNode(change.id);
             if (node?.type === 'zone') {
               // Check if dimensions actually changed (to avoid infinite loop from React Flow emitting unchanged dimensions)
               const currentWidth = node.style?.width;
@@ -1462,7 +1466,7 @@ const SessionCanvas = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         // Call the original handler
         onNodesChangeInternal(changes);
       },
-      [nodes, board, client, onNodesChangeInternal]
+      [board, client, onNodesChangeInternal]
     );
 
     // Handle node drag start
