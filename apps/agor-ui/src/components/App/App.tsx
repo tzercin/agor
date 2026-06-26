@@ -1445,10 +1445,8 @@ export const App: React.FC<AppProps> = ({
                 availableAgents={availableAgents}
                 branchId={newSessionBranchId}
                 branch={newSessionBranch || undefined}
-                mcpServerById={mcpServerById}
                 currentUser={user}
                 client={client}
-                userById={userById}
               />
             )}
             <SettingsModal
@@ -1463,7 +1461,6 @@ export const App: React.FC<AppProps> = ({
               boardObjects={mapToArray(boardObjectById)}
               repoById={repoById}
               branchById={branchById}
-              sessionById={sessionById}
               sessionsByBranch={sessionsByBranch}
               userById={userById}
               mcpServerById={mcpServerById}
@@ -1519,10 +1516,6 @@ export const App: React.FC<AppProps> = ({
                 open={!!sessionSettingsId}
                 onClose={() => setSessionSettingsId(null)}
                 session={sessionSettingsSession}
-                mcpServerById={mcpServerById}
-                sessionMcpServerIds={
-                  sessionSettingsId ? sessionMcpServerIds.get(sessionSettingsId) || [] : []
-                }
                 onUpdate={onUpdateSession}
                 onUpdateSessionMcpServers={onUpdateSessionMcpServers}
                 onUpdateSessionEnvSelections={onUpdateSessionEnvSelections}
@@ -1540,8 +1533,6 @@ export const App: React.FC<AppProps> = ({
               branch={selectedBranch || null}
               repo={selectedBranchRepo || null}
               sessions={branchSessions}
-              boardById={boardById}
-              mcpServerById={mcpServerById}
               client={client}
               currentUser={user}
               onUpdateBranch={onUpdateBranch}
@@ -1570,8 +1561,6 @@ export const App: React.FC<AppProps> = ({
                 setNewBranchDefaultPosition(null);
               }}
               defaultTab={createDialogDefaultTab}
-              repoById={repoById}
-              boardById={boardById}
               currentBoardId={currentBoardId}
               defaultPosition={newBranchDefaultPosition || undefined}
               onCreateBranch={handleCreateBranch}
@@ -1580,7 +1569,6 @@ export const App: React.FC<AppProps> = ({
               onCreateLocalRepo={(data) => onCreateLocalRepo?.(data)}
               onCreateAssistant={handleCreateAssistant}
               availableAgents={availableAgents}
-              mcpServerById={mcpServerById}
               currentUser={user}
               client={client}
               branchStorageConfig={branchStorageConfig}
@@ -1602,7 +1590,6 @@ export const App: React.FC<AppProps> = ({
               }}
               user={user || null}
               currentUser={user || null}
-              mcpServerById={mcpServerById}
               client={client}
               onUpdate={onUpdateUser}
               onRestartOnboarding={async () => {
