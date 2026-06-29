@@ -115,9 +115,11 @@ export interface AgorDaemonSettings {
    *  agents discover others via agor_search_tools (default: true) */
   mcpToolSearch?: boolean;
 
-  /** Unix user the daemon runs as. Used to ensure daemon has access to all Unix groups.
-   * Required when Unix isolation is enabled (branch_rbac or unix_user_mode).
-   * In dev mode without isolation, falls back to current process user. */
+  /** Unix user the daemon runs as. Used to refresh supplemental Unix groups.
+   * Required when Unix impersonation/isolation is enabled (`unix_user_mode`
+   * is `insulated` or `strict`). App-level `branch_rbac` alone does not
+   * require Unix impersonation. In dev mode without isolation, falls back to
+   * current process user. */
   unix_user?: string;
 
   /** Instance label for deployment identification (e.g., "staging", "prod-us-east").
@@ -235,6 +237,12 @@ export interface AgorExternalLaunchSettings {
 
   /** Allow launch assertions to assign admin/superadmin roles (default: false). */
   allow_admin_roles?: boolean;
+
+  /**
+   * Trust a verified assertion email when linking launch auth to an existing
+   * local user that does not yet have this provider identity recorded.
+   */
+  trust_verified_email_for_linking?: boolean;
 
   /**
    * Optional HTTP(S) URL shown in the unauthenticated UI when external launch

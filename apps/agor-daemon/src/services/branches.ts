@@ -11,9 +11,9 @@ import { analyticsLogger } from '@agor/core/analytics';
 import {
   createUserProcessEnvironment,
   ENVIRONMENT,
-  isBranchRbacEnabled,
   loadConfig,
   PAGINATION,
+  resolveExecutionSecurityMode,
 } from '@agor/core/config';
 import {
   BoardRepository,
@@ -67,7 +67,7 @@ import { shouldUseCloneReferencePath } from '../utils/clone-reference.js';
 import { resolveGitImpersonationForBranch } from '../utils/git-impersonation.js';
 import { parseLastMessageTruncationLength } from '../utils/query-params.js';
 import {
-  generateSessionToken,
+  generateScopedServiceToken,
   getDaemonUrl,
   runExecutorCommand,
   spawnExecutor,
@@ -1494,7 +1494,10 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
       const reposService = this.app.service('repos');
       const repo = (await reposService.get(branch.repo_id)) as Repo;
 
-      const rbacEnabled = isBranchRbacEnabled();
+      // Unix group initialization is a filesystem concern controlled by
+      // unix_user_mode. Logical branch RBAC may be enabled in simple/Cloud mode
+      // without creating OS groups.
+      const initUnixGroup = resolveExecutionSecurityMode().shouldInitUnixGroups;
       const { getDaemonUser } = await import('@agor/core/config');
       const daemonUser = getDaemonUser();
 
@@ -1525,8 +1528,9 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
         // Use a service JWT so the executor can patch rendered env command
         // templates without tripping requireAdminForEnvConfig when unarchive
         // is performed by a non-admin user.
-        const sessionToken = generateSessionToken(
-          this.app as unknown as { settings: { authentication?: { secret?: string } } }
+        const sessionToken = generateScopedServiceToken(
+          this.app as unknown as { settings: { authentication?: { secret?: string } } },
+          params
         );
         spawnExecutor(
           {
@@ -1549,7 +1553,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
               restoreMode: true,
               sourceBranch: branch.base_ref || repo.default_branch || 'main',
               // Unix group isolation
-              initUnixGroup: rbacEnabled,
+              initUnixGroup,
               othersAccess: branch.others_fs_access || 'read',
               daemonUser,
               repoUnixGroup: repo.unix_group,
