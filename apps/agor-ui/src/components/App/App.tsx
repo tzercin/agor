@@ -1243,6 +1243,13 @@ export const App: React.FC<AppProps> = ({
                         onBoardClick={navigation.goToBoard}
                         onBranchClick={navigation.goToBranch}
                         onSessionClick={handleSessionClick}
+                        onOpenCreateDialog={(tab, boardId) => {
+                          if (boardId) navigation.goToBoard(boardId);
+                          setNewBranchDefaultPosition(null);
+                          setCreateDialogDefaultTab(tab);
+                          setCreateDialogOpen(true);
+                        }}
+                        onOpenSettings={openSettings}
                       />
                     ) : (
                       <SessionCanvas
