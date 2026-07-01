@@ -22,18 +22,33 @@ import {
   AimOutlined,
   CloseOutlined,
   CodeOutlined,
+  DownOutlined,
   EllipsisOutlined,
   InboxOutlined,
+  SearchOutlined,
   SettingOutlined,
+  UpOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
-import { Alert, App, Badge, Button, Dropdown, Space, Tooltip, Typography, theme } from 'antd';
+import {
+  Alert,
+  App,
+  Badge,
+  Button,
+  Dropdown,
+  Input,
+  Space,
+  Tooltip,
+  Typography,
+  theme,
+} from 'antd';
 import React from 'react';
 import { getDaemonUrl } from '../../config/daemon';
 import { useAppActions } from '../../contexts/AppActionsContext';
 import { useRecenterMap } from '../../contexts/CanvasNavigationContext';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
 import { useSessionActions } from '../../hooks/useSessionActions';
+import { useSessionSearch } from '../../hooks/useSessionSearch';
 import { useSharedReactiveSession } from '../../hooks/useSharedReactiveSession';
 import { useAgorStore } from '../../store/agorStore';
 import {
@@ -68,6 +83,11 @@ import { useComposerAttachments } from './useComposerAttachments';
 
 // Re-export PermissionMode from SDK for convenience
 export type { PermissionMode };
+
+// The find shortcut is Cmd+F on mac, Ctrl+F elsewhere — label it correctly.
+const IS_MAC =
+  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform ?? '');
+const FIND_SHORTCUT_LABEL = IS_MAC ? 'Cmd+F' : 'Ctrl+F';
 
 // ---------------------------------------------------------------------------
 // PromptInput — thin wrapper around AutocompleteTextarea that keeps the typed
@@ -393,6 +413,28 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
 
   const tasks = reactiveSessionState?.tasks || [];
   const attachmentInputRef = React.useRef<HTMLInputElement>(null);
+  const bodyRef = React.useRef<HTMLDivElement | null>(null);
+  // Search observes only the conversation region, not the whole body: the
+  // no-results overlay, footer, and modals are `bodyRef` children, so observing
+  // `bodyRef` would let the overlay's own mount/unmount retrigger the scan.
+  const conversationRef = React.useRef<HTMLDivElement | null>(null);
+  const searchInputRef = React.useRef<HTMLInputElement | null>(null);
+  const {
+    searchOpen,
+    query,
+    setQuery,
+    totalMatches,
+    currentMatch,
+    searchPending,
+    openSearch,
+    closeSearch,
+    goNext,
+    goPrev,
+  } = useSessionSearch(conversationRef, {
+    highlight: token.colorWarning,
+    current: token.colorWarning,
+    currentText: 'rgba(0,0,0,0.88)',
+  });
   const composerSessionIdentityRef = React.useRef<{
     sessionId: SessionID | null;
     generation: number;
@@ -601,6 +643,36 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   React.useEffect(() => {
     setEffortLevel(session?.model_config?.effort || 'high');
   }, [session?.model_config?.effort]);
+
+  React.useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f' && open) {
+        e.preventDefault();
+        if (!searchOpen) openSearch();
+        else searchInputRef.current?.focus();
+      }
+      if (e.key === 'Escape' && searchOpen) closeSearch();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [searchOpen, open, openSearch, closeSearch]);
+
+  // Reset search when switching sessions — stale ranges/counts belong to the
+  // previous conversation's DOM.
+  const prevSearchSessionIdRef = React.useRef(session?.session_id ?? null);
+  React.useEffect(() => {
+    const id = session?.session_id ?? null;
+    if (prevSearchSessionIdRef.current !== id) {
+      prevSearchSessionIdRef.current = id;
+      closeSearch();
+    }
+  }, [session?.session_id, closeSearch]);
+
+  React.useEffect(() => {
+    if (searchOpen) {
+      setTimeout(() => searchInputRef.current?.focus(), 30);
+    }
+  }, [searchOpen]);
 
   // When there's no session, render nothing (panel is collapsed to zero).
   // When open=false, we still render the component tree (hidden) so that
@@ -1113,28 +1185,19 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
           background: token.colorBgContainer,
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-          <Space size={12} align="start" style={{ flex: 1 }}>
-            <ToolIcon tool={session.agentic_tool} size={40} />
-            <div style={{ flex: 1 }}>
-              <div style={{ marginBottom: 4 }}>
-                <Typography.Text
-                  strong
-                  style={{
-                    fontSize: 18,
-                    ...getSessionTitleStyles(2),
-                  }}
-                >
-                  {getSessionDisplayTitle(session, { includeAgentFallback: true })}
-                </Typography.Text>
-                <Badge
-                  status={getStatusColor()}
-                  text={session.status.toUpperCase()}
-                  style={{ marginLeft: 12 }}
-                />
-              </div>
+        {/* Row 1: icon + title + badge + actions, center-aligned */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', flex: 1, minWidth: 0 }}>
+            <div style={{ flexShrink: 0 }}>
+              <ToolIcon tool={session.agentic_tool} size={40} />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <Typography.Text strong style={{ fontSize: 18, ...getSessionTitleStyles(2) }}>
+                {getSessionDisplayTitle(session, { includeAgentFallback: true })}
+              </Typography.Text>
+              <Badge status={getStatusColor()} text={session.status.toUpperCase()} />
               {session.created_by && (
-                <div>
+                <div style={{ marginTop: token.sizeUnit }}>
                   <CreatedByTag
                     createdBy={session.created_by}
                     currentUserId={currentUserId}
@@ -1144,7 +1207,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                 </div>
               )}
             </div>
-          </Space>
+          </div>
           <Space size={4}>
             <SessionAttachmentsDropdown items={attachmentItems} />
             <Dropdown menu={{ items: moreMenuItems }} trigger={['click']} placement="bottomRight">
@@ -1152,6 +1215,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                 <Button type="text" icon={<EllipsisOutlined />} />
               </Tooltip>
             </Dropdown>
+            <Tooltip title={`Search session (${FIND_SHORTCUT_LABEL})`}>
+              <Button type="text" icon={<SearchOutlined />} onClick={openSearch} />
+            </Tooltip>
             <Tooltip title="Close Panel">
               <Button
                 type="text"
@@ -1162,38 +1228,163 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             </Tooltip>
           </Space>
         </div>
+        {/* Row 2: search bar — always in DOM, animates in/out */}
+        <div
+          style={{
+            overflow: 'hidden',
+            maxHeight: searchOpen ? '36px' : '0px',
+            opacity: searchOpen ? 1 : 0,
+            marginTop: searchOpen ? '4px' : '0px',
+            transition: 'max-height 0.15s ease, opacity 0.12s ease, margin-top 0.15s ease',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <SearchOutlined style={{ color: token.colorPrimary, fontSize: 14, flexShrink: 0 }} />
+            <Input
+              ref={(el) => {
+                searchInputRef.current = el?.input ?? null;
+              }}
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.shiftKey ? goPrev() : goNext();
+                if (e.key === 'Escape') closeSearch();
+              }}
+              placeholder="Search session..."
+              variant="borderless"
+              style={{ flex: 1, padding: 0 }}
+              size="small"
+            />
+            {query && (
+              <Typography.Text
+                type="secondary"
+                style={{
+                  fontSize: 12,
+                  whiteSpace: 'nowrap',
+                  minWidth: 44,
+                  textAlign: 'right',
+                  fontVariantNumeric: 'tabular-nums',
+                }}
+              >
+                {totalMatches > 0 ? `${currentMatch + 1} / ${totalMatches}` : ''}
+              </Typography.Text>
+            )}
+            {!query && (
+              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                Esc to close
+              </Typography.Text>
+            )}
+            {totalMatches > 1 && (
+              <Space size={2}>
+                <Tooltip title="Previous (Shift+Enter)">
+                  <Button type="text" size="small" icon={<UpOutlined />} onClick={goPrev} />
+                </Tooltip>
+                <Tooltip title="Next (Enter)">
+                  <Button type="text" size="small" icon={<DownOutlined />} onClick={goNext} />
+                </Tooltip>
+              </Space>
+            )}
+            <Tooltip title="Close search (Esc)">
+              <Button type="text" size="small" icon={<CloseOutlined />} onClick={closeSearch} />
+            </Tooltip>
+          </div>
+        </div>
       </div>
 
       {/* Body - Scrollable content */}
       <div
+        ref={bodyRef}
         style={{
           flex: 1,
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
           padding: `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px 0`,
+          position: 'relative',
         }}
       >
-        <SessionPanelContent
-          client={client}
-          session={session}
-          branch={branch}
-          currentUserId={currentUserId}
-          sessionMcpServerIds={sessionMcpServerIds}
-          scrollToBottom={scrollToBottom}
-          scrollToTop={scrollToTop}
-          setScrollToBottom={setScrollToBottom}
-          setScrollToTop={setScrollToTop}
-          queuedTasks={queuedTasks}
-          setQueuedTasks={setQueuedTasks}
-          spawnModalOpen={spawnModalOpen}
-          setSpawnModalOpen={setSpawnModalOpen}
-          onSpawnModalConfirm={handleSpawnModalConfirm}
-          inputValueRef={inputValueRef}
-          isOpen={open}
-          cliViewMode={cliViewMode}
-          setCliViewMode={setCliViewMode}
-        />
+        {searchOpen && query.trim() && totalMatches === 0 && !searchPending && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 10,
+              pointerEvents: 'none',
+              background: `${token.colorBgContainer}cc`,
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                padding: '28px 16px',
+                gap: 6,
+              }}
+            >
+              <div
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: '50%',
+                  background: token.colorFillTertiary,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginBottom: 2,
+                }}
+              >
+                <SearchOutlined style={{ fontSize: 16, color: token.colorTextTertiary }} />
+              </div>
+              <Typography.Text strong style={{ fontSize: 13 }}>
+                No results
+              </Typography.Text>
+              <Typography.Text
+                type="secondary"
+                style={{ fontSize: 12, textAlign: 'center', lineHeight: 1.5, maxWidth: 200 }}
+              >
+                Nothing matched <Typography.Text code>{query}</Typography.Text>
+              </Typography.Text>
+            </div>
+          </div>
+        )}
+        <div
+          ref={conversationRef}
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
+          <SessionPanelContent
+            client={client}
+            session={session}
+            branch={branch}
+            currentUserId={currentUserId}
+            sessionMcpServerIds={sessionMcpServerIds}
+            scrollToBottom={scrollToBottom}
+            scrollToTop={scrollToTop}
+            setScrollToBottom={setScrollToBottom}
+            setScrollToTop={setScrollToTop}
+            queuedTasks={queuedTasks}
+            setQueuedTasks={setQueuedTasks}
+            spawnModalOpen={spawnModalOpen}
+            setSpawnModalOpen={setSpawnModalOpen}
+            onSpawnModalConfirm={handleSpawnModalConfirm}
+            inputValueRef={inputValueRef}
+            isOpen={open}
+            cliViewMode={cliViewMode}
+            setCliViewMode={setCliViewMode}
+            forceExpandAll={searchOpen && query.trim().length > 0}
+          />
+        </div>
 
         {/* Footer — rendered outside SessionPanelContent so that
             keystroke-driven re-renders don't propagate to ConversationView.
