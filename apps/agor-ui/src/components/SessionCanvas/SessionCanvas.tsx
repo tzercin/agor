@@ -62,6 +62,7 @@ import {
 } from '../../contexts/CanvasNavigationContext';
 import { useMutationGate } from '../../contexts/ConnectionContext';
 import { useCursorTracking } from '../../hooks/useCursorTracking';
+import { useStableCallback } from '../../hooks/useStableCallback';
 import { useAgorStore } from '../../store/agorStore';
 import {
   makeBoardObjectsForBoardSelector,
@@ -209,7 +210,6 @@ interface BranchNodeData {
   branch: Branch;
   repo: Repo;
   boardId?: string | null;
-  userById: Map<string, User>;
   currentUserId?: string;
   onTaskClick?: (taskId: string) => void;
   onSessionClick?: (sessionId: string) => void;
@@ -277,6 +277,12 @@ const BranchNode = React.memo(
       [data.branch.branch_id]
     );
     const sessions = useAgorStore(sessionsSelector) ?? EMPTY_SESSIONS;
+    // Sourced from the store rather than carried in `data`: BranchCard reads
+    // arbitrary users (session/message authors), so the whole map is the
+    // narrowest mechanical slice. Keeping it out of `data` keeps the map out
+    // of the parent's node-building dependencies, so a user patch updates the
+    // affected cards without rebuilding every node's `data` on the board.
+    const userById = useAgorStore(selectUserById);
     return (
       <div className="branch-node">
         <BranchCard
@@ -284,7 +290,7 @@ const BranchNode = React.memo(
           repo={data.repo}
           sessions={sessions}
           progressiveMountKey={data.boardId ?? 'no-board'}
-          userById={data.userById}
+          userById={userById}
           currentUserId={data.currentUserId}
           selectedSessionId={data.selectedSessionId}
           isActiveUrlTarget={data.isActiveUrlTarget}
@@ -323,7 +329,6 @@ const BranchNode = React.memo(
       p.branch === n.branch &&
       p.repo === n.repo &&
       p.boardId === n.boardId &&
-      p.userById === n.userById &&
       p.currentUserId === n.currentUserId &&
       p.selectedSessionId === n.selectedSessionId &&
       p.isActiveUrlTarget === n.isActiveUrlTarget &&
@@ -673,7 +678,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         }
       });
       return labels;
-    }, [board]);
+    }, [board?.objects]);
 
     const warnedInvalidZoneRefsRef = useRef<Set<string>>(new Set());
     const warnInvalidZoneRef = useCallback(
@@ -695,62 +700,62 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       []
     );
 
-    // Handler to unpin a branch from its zone
-    const handleUnpinBranch = useCallback(
-      async (branchId: string) => {
-        if (!board || !client) return;
+    // Handler to unpin a branch from its zone. Identity-stabilized because it
+    // feeds every branch node's `data.onUnpin`: a fresh identity (its closure
+    // reads `board` and the placement map, which change on every board patch)
+    // would defeat BranchNode's areEqual for all branches at once.
+    const handleUnpinBranch = useStableCallback(async (branchId: string) => {
+      if (!board || !client) return;
 
-        // Find the board_object for this branch
-        const boardObject = boardObjectByBranch.get(branchId);
+      // Find the board_object for this branch
+      const boardObject = boardObjectByBranch.get(branchId);
 
-        if (!boardObject?.zone_id) {
-          return;
-        }
+      if (!boardObject?.zone_id) {
+        return;
+      }
 
-        // Get zone position from board.objects
-        const zone = board.objects?.[boardObject.zone_id];
+      // Get zone position from board.objects
+      const zone = board.objects?.[boardObject.zone_id];
 
-        if (!zone) {
-          console.error('Cannot unpin: zone not found', {
-            zoneId: boardObject.zone_id,
-          });
-          return;
-        }
-
-        // Calculate absolute position from relative position
-        // Branch's position is relative to zone when pinned, so add zone's position
-        const absoluteX = boardObject.position.x + zone.x;
-        const absoluteY = boardObject.position.y + zone.y;
-
-        // Optimistically store absolute position in localPositionsRef
-        // This will be used by the node sync effect until WebSocket confirms
-        localPositionsRef.current[branchId] = {
-          x: absoluteX,
-          y: absoluteY,
-        };
-
-        // Trigger immediate React Flow update
-        setNodes((currentNodes) =>
-          currentNodes.map((node) => {
-            if (node.id === branchId) {
-              return {
-                ...node,
-                position: { x: absoluteX, y: absoluteY },
-                parentId: undefined, // Remove parent relationship
-              };
-            }
-            return node;
-          })
-        );
-
-        // Update with absolute position and clear zone_id
-        await client.service('board-objects').patch(boardObject.object_id, {
-          position: { x: absoluteX, y: absoluteY },
-          zone_id: null, // null serializes correctly, undefined gets stripped
+      if (!zone) {
+        console.error('Cannot unpin: zone not found', {
+          zoneId: boardObject.zone_id,
         });
-      },
-      [board, client, boardObjectByBranch, setNodes]
-    );
+        return;
+      }
+
+      // Calculate absolute position from relative position
+      // Branch's position is relative to zone when pinned, so add zone's position
+      const absoluteX = boardObject.position.x + zone.x;
+      const absoluteY = boardObject.position.y + zone.y;
+
+      // Optimistically store absolute position in localPositionsRef
+      // This will be used by the node sync effect until WebSocket confirms
+      localPositionsRef.current[branchId] = {
+        x: absoluteX,
+        y: absoluteY,
+      };
+
+      // Trigger immediate React Flow update
+      setNodes((currentNodes) =>
+        currentNodes.map((node) => {
+          if (node.id === branchId) {
+            return {
+              ...node,
+              position: { x: absoluteX, y: absoluteY },
+              parentId: undefined, // Remove parent relationship
+            };
+          }
+          return node;
+        })
+      );
+
+      // Update with absolute position and clear zone_id
+      await client.service('board-objects').patch(boardObject.object_id, {
+        position: { x: absoluteX, y: absoluteY },
+        zone_id: null, // null serializes correctly, undefined gets stripped
+      });
+    });
 
     // Convert branches to React Flow nodes (branch-centric approach)
     const initialNodes: Node[] = useMemo(() => {
@@ -816,7 +821,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             branch,
             repo,
             boardId: board?.board_id ?? null,
-            userById,
             currentUserId,
             selectedSessionId,
             isActiveUrlTarget: branch.branch_id === activeUrlTargetBranchId,
@@ -846,7 +850,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
       return nodes;
     }, [
-      board,
+      board?.objects,
+      board?.board_id,
       branches,
       primaryAssistantId,
       boardObjectByBranch,
@@ -871,53 +876,48 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       handleUnpinBranch,
       zoneLabels,
       warnInvalidZoneRef,
-      userById,
       client,
     ]);
 
-    // Handler to open card modal
-    const handleCardClick = useCallback(
-      (cardId: string) => {
-        const card = cardById.get(cardId);
-        if (card) {
-          setSelectedCard(card);
-          setCardModalOpen(true);
-        }
-      },
-      [cardById]
-    );
+    // Handler to open card modal. Identity-stabilized so card-map churn does
+    // not hand every card node a fresh `data.onClick`.
+    const handleCardClick = useStableCallback((cardId: string) => {
+      const card = cardById.get(cardId);
+      if (card) {
+        setSelectedCard(card);
+        setCardModalOpen(true);
+      }
+    });
 
-    // Handler to unpin a card from its zone
-    const handleUnpinCard = useCallback(
-      async (cardId: string) => {
-        if (!board || !client) return;
-        const boardObject = boardObjectByCard.get(cardId);
-        if (!boardObject?.zone_id) return;
+    // Handler to unpin a card from its zone. Identity-stabilized for the same
+    // reason as handleUnpinBranch.
+    const handleUnpinCard = useStableCallback(async (cardId: string) => {
+      if (!board || !client) return;
+      const boardObject = boardObjectByCard.get(cardId);
+      if (!boardObject?.zone_id) return;
 
-        const zone = board.objects?.[boardObject.zone_id];
-        if (!zone) return;
+      const zone = board.objects?.[boardObject.zone_id];
+      if (!zone) return;
 
-        const absoluteX = boardObject.position.x + zone.x;
-        const absoluteY = boardObject.position.y + zone.y;
+      const absoluteX = boardObject.position.x + zone.x;
+      const absoluteY = boardObject.position.y + zone.y;
 
-        localPositionsRef.current[`card-${cardId}`] = { x: absoluteX, y: absoluteY };
+      localPositionsRef.current[`card-${cardId}`] = { x: absoluteX, y: absoluteY };
 
-        setNodes((currentNodes) =>
-          currentNodes.map((node) => {
-            if (node.id === `card-${cardId}`) {
-              return { ...node, position: { x: absoluteX, y: absoluteY }, parentId: undefined };
-            }
-            return node;
-          })
-        );
+      setNodes((currentNodes) =>
+        currentNodes.map((node) => {
+          if (node.id === `card-${cardId}`) {
+            return { ...node, position: { x: absoluteX, y: absoluteY }, parentId: undefined };
+          }
+          return node;
+        })
+      );
 
-        await client.service('board-objects').patch(boardObject.object_id, {
-          position: { x: absoluteX, y: absoluteY },
-          zone_id: null,
-        });
-      },
-      [board, client, boardObjectByCard, setNodes]
-    );
+      await client.service('board-objects').patch(boardObject.object_id, {
+        position: { x: absoluteX, y: absoluteY },
+        zone_id: null,
+      });
+    });
 
     // Build card nodes from board_objects that have card_id set
     const cardNodes: Node[] = useMemo(() => {
@@ -963,7 +963,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
       return nodes;
     }, [
-      board,
+      board?.objects,
       boardObjectByCard,
       cardById,
       zoneLabels,
@@ -1178,19 +1178,26 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       onCommentSelect,
     ]);
 
-    // Helper: Apply local position overrides to a set of incoming nodes (branches or cards)
+    // Helper: Apply local position overrides to a set of incoming nodes (branches or cards).
+    // Lookups go through Maps so a full board sync stays O(n) instead of
+    // O(n²) per-node array scans.
     const applyLocalPositions = useCallback(
-      (incomingNodes: Node[], currentNodes: Node[], zoneNodes: Node[]) => {
+      (incomingNodes: Node[], currentNodesById: Map<string, Node>, zoneNodes: Node[]) => {
+        // Incoming nodes take precedence over zones on id collision (insertion
+        // order below makes them overwrite), matching parent resolution that
+        // consults incoming nodes first.
+        const parentById = new Map<string, Node>();
+        for (const node of zoneNodes) parentById.set(node.id, node);
+        for (const node of incomingNodes) parentById.set(node.id, node);
+
         return incomingNodes.map((newNode) => {
-          const existingNode = currentNodes.find((n) => n.id === newNode.id);
+          const existingNode = currentNodesById.get(newNode.id);
           const localPosition = localPositionsRef.current[newNode.id];
 
           if (localPosition) {
             let incomingAbsolutePosition = newNode.position;
             if (newNode.parentId) {
-              const parentNode = [...incomingNodes, ...zoneNodes].find(
-                (n) => n.id === newNode.parentId
-              );
+              const parentNode = parentById.get(newNode.parentId);
               if (parentNode) {
                 incomingAbsolutePosition = relativeToAbsolute(
                   newNode.position,
@@ -1214,9 +1221,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
             let positionToUse = localPosition;
             if (newNode.parentId) {
-              const parentNode = [...incomingNodes, ...zoneNodes].find(
-                (n) => n.id === newNode.parentId
-              );
+              const parentNode = parentById.get(newNode.parentId);
               if (parentNode) {
                 positionToUse = absoluteToRelative(localPosition, parentNode.position);
               }
@@ -1272,16 +1277,39 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       ]
     );
 
-    // Helper: Partition nodes by type
+    // Helper: Partition nodes by type in a single pass (this runs inside every
+    // node-sync setNodes updater, so per-type .filter sweeps add up on large boards)
     const partitionNodesByType = useCallback((nodes: Node[]) => {
-      return {
-        zones: nodes.filter((n) => n.type === 'zone'),
-        markdown: nodes.filter((n) => n.type === 'markdown'),
-        branches: nodes.filter((n) => n.type === 'branchNode'),
-        cards: nodes.filter((n) => n.type === 'cardNode'),
-        apps: nodes.filter((n) => n.type === 'appNode' || n.type === 'artifactNode'),
-        comments: nodes.filter((n) => n.type === 'comment'),
-      };
+      const zones: Node[] = [];
+      const markdown: Node[] = [];
+      const branches: Node[] = [];
+      const cards: Node[] = [];
+      const apps: Node[] = [];
+      const comments: Node[] = [];
+      for (const node of nodes) {
+        switch (node.type) {
+          case 'zone':
+            zones.push(node);
+            break;
+          case 'markdown':
+            markdown.push(node);
+            break;
+          case 'branchNode':
+            branches.push(node);
+            break;
+          case 'cardNode':
+            cards.push(node);
+            break;
+          case 'appNode':
+          case 'artifactNode':
+            apps.push(node);
+            break;
+          case 'comment':
+            comments.push(node);
+            break;
+        }
+      }
+      return { zones, markdown, branches, cards, apps, comments };
     }, []);
 
     // Helper: Apply consistent z-ordering to nodes
@@ -1317,11 +1345,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
       setNodes((currentNodes) => {
         const { comments } = partitionNodesByType(currentNodes);
+        const currentNodesById = new Map(currentNodes.map((n) => [n.id, n]));
 
         const zones = boardObjectNodes
           .filter((n) => n.type === 'zone' && !deletedObjectsRef.current.has(n.id))
           .map((newZone) => {
-            const existingZone = currentNodes.find((n) => n.id === newZone.id);
+            const existingZone = currentNodesById.get(newZone.id);
             // Honor the persisted/default base order from board data (`newZone`),
             // and re-apply the +1 selection bump if the zone is currently
             // selected. Reading the base from `newZone` (not the stale runtime
@@ -1338,7 +1367,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         const markdown = boardObjectNodes
           .filter((n) => n.type === 'markdown' && !deletedObjectsRef.current.has(n.id))
           .map((newMarkdown) => {
-            const existingMarkdown = currentNodes.find((n) => n.id === newMarkdown.id);
+            const existingMarkdown = currentNodesById.get(newMarkdown.id);
             return { ...newMarkdown, selected: existingMarkdown?.selected };
           });
 
@@ -1349,12 +1378,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               !deletedObjectsRef.current.has(n.id)
           )
           .map((newApp) => {
-            const existingApp = currentNodes.find((n) => n.id === newApp.id);
+            const existingApp = currentNodesById.get(newApp.id);
             return { ...newApp, selected: existingApp?.selected };
           });
 
-        const updatedBranches = applyLocalPositions(initialNodes, currentNodes, zones);
-        const updatedCards = applyLocalPositions(cardNodes, currentNodes, zones);
+        const updatedBranches = applyLocalPositions(initialNodes, currentNodesById, zones);
+        const updatedCards = applyLocalPositions(cardNodes, currentNodesById, zones);
 
         return applyZOrder(zones, markdown, updatedBranches, updatedCards, comments, apps);
       });
@@ -1375,6 +1404,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       setNodes((currentNodes) => {
         const { zones, markdown, branches, cards, apps } = partitionNodesByType(currentNodes);
 
+        // Comment parents are branches or zones; branches take precedence on id
+        // collision (insertion order below makes them overwrite).
+        const parentById = new Map<string, Node>();
+        for (const node of zones) parentById.set(node.id, node);
+        for (const node of branches) parentById.set(node.id, node);
+
         // Apply local position overrides to comment nodes (to prevent flicker during drag)
         const commentsWithLocalPositions = commentNodes.map((newNode) => {
           const localPosition = localPositionsRef.current[newNode.id];
@@ -1384,7 +1419,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // If node has parentId, position is relative to parent - must convert to absolute
             let incomingAbsolutePosition = newNode.position;
             if (newNode.parentId) {
-              const parentNode = [...branches, ...zones].find((n) => n.id === newNode.parentId);
+              const parentNode = parentById.get(newNode.parentId);
               if (parentNode) {
                 incomingAbsolutePosition = relativeToAbsolute(
                   newNode.position,
@@ -1408,7 +1443,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // If node now has parentId, convert local absolute position to relative
             let positionToUse = localPosition;
             if (newNode.parentId) {
-              const parentNode = [...branches, ...zones].find((n) => n.id === newNode.parentId);
+              const parentNode = parentById.get(newNode.parentId);
               if (parentNode) {
                 positionToUse = absoluteToRelative(localPosition, parentNode.position);
               }
