@@ -42,6 +42,28 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
     return counts;
   }, [boards, branchById]);
 
+  // Per-board count of branches flagged `needs_attention` — the same signal
+  // that drives the glow halo on branch cards, surfaced here so users can
+  // spot boards with waiting sessions without visiting each one.
+  const attentionCountByBoard = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const branch of branchById.values()) {
+      if (branch.board_id && branch.needs_attention) {
+        counts.set(branch.board_id, (counts.get(branch.board_id) || 0) + 1);
+      }
+    }
+    return counts;
+  }, [branchById]);
+
+  // Attention on the *current* board is already visible on the canvas
+  // itself, so the closed-trigger dot only fires for other boards.
+  const otherBoardsNeedAttention = useMemo(() => {
+    for (const [boardId, count] of attentionCountByBoard) {
+      if (count > 0 && boardId !== currentBoardId) return true;
+    }
+    return false;
+  }, [attentionCountByBoard, currentBoardId]);
+
   const showFilter = boards.length >= FILTER_THRESHOLD;
 
   const closeDropdown = useCallback(() => {
@@ -86,6 +108,7 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
 
     return filteredBoards.map((board) => {
       const branchCount = branchCountByBoard.get(board.board_id) || 0;
+      const attentionCount = attentionCountByBoard.get(board.board_id) || 0;
       const isActive = board.board_id === currentBoardId;
       return {
         key: board.board_id,
@@ -103,17 +126,35 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
               <span style={{ fontSize: 18 }}>{board.icon || '📋'}</span>
               <Text strong={isActive}>{board.name}</Text>
             </Space>
-            <Badge
-              count={branchCount}
-              showZero
-              style={{ backgroundColor: isActive ? token.colorPrimary : token.colorBgTextHover }}
-            />
+            <Space size={6}>
+              {attentionCount > 0 && (
+                <Badge
+                  count={attentionCount}
+                  title={`${attentionCount} ${attentionCount === 1 ? 'branch needs' : 'branches need'} attention`}
+                  style={{ backgroundColor: token.colorWarning }}
+                />
+              )}
+              <Badge
+                count={branchCount}
+                showZero
+                style={{ backgroundColor: isActive ? token.colorPrimary : token.colorBgTextHover }}
+              />
+            </Space>
           </div>
         ),
         onClick: () => handleBoardClick(board.board_id),
       };
     });
-  }, [boards, currentBoardId, branchCountByBoard, handleBoardClick, token, filterText, showFilter]);
+  }, [
+    boards,
+    currentBoardId,
+    branchCountByBoard,
+    attentionCountByBoard,
+    handleBoardClick,
+    token,
+    filterText,
+    showFilter,
+  ]);
 
   const homeRow = (
     <Button
@@ -205,7 +246,14 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
         }}
       >
         <Space size={8}>
-          <span style={{ fontSize: 18 }}>{currentBoard ? currentBoard.icon || '📋' : '🏠'}</span>
+          <Badge
+            dot={otherBoardsNeedAttention}
+            color={token.colorWarning}
+            offset={[-2, 4]}
+            title={otherBoardsNeedAttention ? 'Another board has branches needing attention' : ''}
+          >
+            <span style={{ fontSize: 18 }}>{currentBoard ? currentBoard.icon || '📋' : '🏠'}</span>
+          </Badge>
           <Text strong>{currentBoard?.name || 'Home'}</Text>
         </Space>
         <DownOutlined style={{ fontSize: 12, color: token.colorTextSecondary }} />
