@@ -1,4 +1,4 @@
-import type { Board, Branch } from '@agor-live/client';
+import type { Board, Branch, Session } from '@agor-live/client';
 import { DownOutlined, HomeOutlined, SearchOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { Badge, Button, Divider, Dropdown, Input, Space, Typography, theme } from 'antd';
@@ -16,6 +16,7 @@ interface BoardSwitcherProps {
   onBoardChange: (boardId: string) => void;
   onHomeClick?: () => void;
   branchById: Map<string, Branch>;
+  sessionById: Map<string, Session>;
 }
 
 export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
@@ -24,6 +25,7 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
   onBoardChange,
   onHomeClick,
   branchById,
+  sessionById,
 }) => {
   const { token } = useToken();
   const [filterText, setFilterText] = useState('');
@@ -42,18 +44,29 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
     return counts;
   }, [boards, branchById]);
 
-  // Per-board count of branches flagged `needs_attention` — the same signal
-  // that drives the glow halo on branch cards, surfaced here so users can
-  // spot boards with waiting sessions without visiting each one.
+  // Per-board count of branches needing attention, surfaced here so users
+  // can spot boards with waiting work without visiting each one. A branch
+  // counts when its `needs_attention` flag is set (new branches default to
+  // true) OR any of its active (non-archived) sessions is `ready_for_prompt`
+  // — the same predicate that drives the glow halo on branch cards, so the
+  // badge and the canvas never disagree. Archived branches are hidden from
+  // boards and therefore excluded.
   const attentionCountByBoard = useMemo(() => {
+    const readyBranchIds = new Set<string>();
+    for (const session of sessionById.values()) {
+      if (session.branch_id && !session.archived && session.ready_for_prompt === true) {
+        readyBranchIds.add(session.branch_id);
+      }
+    }
     const counts = new Map<string, number>();
     for (const branch of branchById.values()) {
-      if (branch.board_id && branch.needs_attention) {
+      if (!branch.board_id || branch.archived) continue;
+      if (branch.needs_attention || readyBranchIds.has(branch.branch_id)) {
         counts.set(branch.board_id, (counts.get(branch.board_id) || 0) + 1);
       }
     }
     return counts;
-  }, [branchById]);
+  }, [branchById, sessionById]);
 
   // Attention on the *current* board is already visible on the canvas
   // itself, so the closed-trigger dot only fires for other boards.

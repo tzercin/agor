@@ -1,4 +1,4 @@
-import type { Board, Branch } from '@agor-live/client';
+import type { Board, Branch, Session } from '@agor-live/client';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { makeBranch } from '../BranchModal/testUtils';
@@ -13,14 +13,31 @@ function makeBoard(overrides: Partial<Board> = {}): Board {
   } as unknown as Board;
 }
 
-function renderSwitcher(boards: Board[], branches: Branch[], currentBoardId?: string) {
+function makeSession(overrides: Partial<Session> = {}): Session {
+  return {
+    session_id: 'session-1',
+    branch_id: 'br-1',
+    archived: false,
+    ready_for_prompt: false,
+    ...overrides,
+  } as unknown as Session;
+}
+
+function renderSwitcher(
+  boards: Board[],
+  branches: Branch[],
+  currentBoardId?: string,
+  sessions: Session[] = []
+) {
   const branchById = new Map(branches.map((b) => [b.branch_id, b]));
+  const sessionById = new Map(sessions.map((s) => [s.session_id, s]));
   return render(
     <BoardSwitcher
       boards={boards}
       currentBoardId={currentBoardId}
       onBoardChange={() => {}}
       branchById={branchById}
+      sessionById={sessionById}
     />
   );
 }
@@ -62,6 +79,55 @@ describe('BoardSwitcher attention indicators', () => {
     // Branch-count badges also carry explicit hover text.
     expect(screen.getByTitle('2 branches on this board')).toBeInTheDocument();
     expect(screen.getByTitle('1 branch on this board')).toBeInTheDocument();
+  });
+
+  it('counts branches whose active sessions are ready for prompt', () => {
+    const boards = [makeBoard({ board_id: 'board-1', name: 'Alpha' })];
+    const branches = [
+      makeBranch({
+        branch_id: 'br-1',
+        board_id: 'board-1',
+        needs_attention: false,
+      } as Partial<Branch>),
+    ];
+    const sessions = [
+      makeSession({ session_id: 's-1', branch_id: 'br-1', ready_for_prompt: true }),
+    ];
+
+    renderSwitcher(boards, branches, 'board-1', sessions);
+    openDropdown();
+
+    expect(screen.getByTitle('1 branch needs attention')).toBeInTheDocument();
+  });
+
+  it('ignores archived sessions and archived branches', () => {
+    const boards = [makeBoard({ board_id: 'board-1', name: 'Alpha' })];
+    const branches = [
+      makeBranch({
+        branch_id: 'br-1',
+        board_id: 'board-1',
+        needs_attention: false,
+      } as Partial<Branch>),
+      makeBranch({
+        branch_id: 'br-2',
+        board_id: 'board-1',
+        needs_attention: true,
+        archived: true,
+      } as Partial<Branch>),
+    ];
+    const sessions = [
+      makeSession({
+        session_id: 's-1',
+        branch_id: 'br-1',
+        ready_for_prompt: true,
+        archived: true,
+      }),
+    ];
+
+    renderSwitcher(boards, branches, 'board-1', sessions);
+    openDropdown();
+
+    expect(screen.queryByTitle(/attention/)).not.toBeInTheDocument();
   });
 
   it('shows a dot on the trigger only when a non-current board needs attention', () => {
