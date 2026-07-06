@@ -137,6 +137,7 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
               <Badge
                 count={branchCount}
                 showZero
+                title={`${branchCount} ${branchCount === 1 ? 'branch' : 'branches'} on this board`}
                 style={{ backgroundColor: isActive ? token.colorPrimary : token.colorBgTextHover }}
               />
             </Space>

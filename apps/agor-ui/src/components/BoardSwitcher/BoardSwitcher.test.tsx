@@ -59,6 +59,9 @@ describe('BoardSwitcher attention indicators', () => {
 
     expect(screen.getByTitle('2 branches need attention')).toBeInTheDocument();
     expect(screen.queryByTitle(/branch needs attention/)).not.toBeInTheDocument();
+    // Branch-count badges also carry explicit hover text.
+    expect(screen.getByTitle('2 branches on this board')).toBeInTheDocument();
+    expect(screen.getByTitle('1 branch on this board')).toBeInTheDocument();
   });
 
   it('shows a dot on the trigger only when a non-current board needs attention', () => {
