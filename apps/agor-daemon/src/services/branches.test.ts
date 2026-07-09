@@ -814,6 +814,66 @@ describe('BranchesService.patch primary assistant invariants', () => {
   });
 });
 
+describe('BranchesService one-shot assistant creation wiring', () => {
+  // A branch created with assistant metadata on the initial row (the MCP create
+  // path and the UI path) must designate the board's primary assistant. This is
+  // the promotion that IS supported — as opposed to flipping an existing branch
+  // via patch, which the assertAssistantKindIsStable guard (deliberately) blocks.
+  function createAssistantWiringHarness() {
+    const boardsEmit = vi.fn();
+    const app = {
+      service(path: string) {
+        if (path === 'boards') return { emit: boardsEmit };
+        throw new Error(`Unknown service: ${path}`);
+      },
+    } as unknown as Application;
+    const boardRepo = {
+      setPrimaryAssistantIfUnset: vi.fn(async (boardId: string) => ({
+        board_id: boardId,
+        primary_assistant_id: 'assistant-new',
+      })),
+    };
+    const service = new BranchesService(createTenantScopeTestDb() as never, app);
+    (service as unknown as { boardRepo: typeof boardRepo }).boardRepo = boardRepo;
+    const invoke = (branch: Record<string, unknown>) =>
+      (
+        service as unknown as {
+          maybeSetBoardPrimaryAssistant: (b: unknown) => Promise<void>;
+        }
+      ).maybeSetBoardPrimaryAssistant(branch);
+    return { boardRepo, boardsEmit, invoke };
+  }
+
+  it('sets the board primary assistant pointer for a newly created assistant branch', async () => {
+    const { boardRepo, boardsEmit, invoke } = createAssistantWiringHarness();
+
+    await invoke({
+      branch_id: 'assistant-new' as BranchID,
+      board_id: 'board-a' as BoardID,
+      custom_context: assistantContext,
+    });
+
+    expect(boardRepo.setPrimaryAssistantIfUnset).toHaveBeenCalledWith('board-a', 'assistant-new');
+    expect(boardsEmit).toHaveBeenCalledWith(
+      'patched',
+      expect.objectContaining({ board_id: 'board-a' })
+    );
+  });
+
+  it('leaves the board primary pointer untouched for a non-assistant branch', async () => {
+    const { boardRepo, boardsEmit, invoke } = createAssistantWiringHarness();
+
+    await invoke({
+      branch_id: 'plain-new' as BranchID,
+      board_id: 'board-a' as BoardID,
+      custom_context: {},
+    });
+
+    expect(boardRepo.setPrimaryAssistantIfUnset).not.toHaveBeenCalled();
+    expect(boardsEmit).not.toHaveBeenCalled();
+  });
+});
+
 describe('BranchesService.unarchive', () => {
   it('preserves existing board_id when options.boardId is not provided', async () => {
     const { service, boardObjectsService, sessionsService } = createServiceHarness();
