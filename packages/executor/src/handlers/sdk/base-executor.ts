@@ -5,7 +5,11 @@
  * Claude, Codex, Gemini, and OpenCode executors.
  */
 
-import { type ApiKeyName, stripProviderCredentialEnvironment } from '@agor/core/config';
+import {
+  AGOR_USER_ENV_KEYS_VAR,
+  type ApiKeyName,
+  stripProviderCredentialEnvironment,
+} from '@agor/core/config';
 import { generateId, shortId } from '@agor/core/db';
 import type {
   AgenticToolName,
@@ -347,13 +351,31 @@ export async function resolveApiKeyForTask(
   return result;
 }
 
-function installProviderConnection(connection: Record<string, string | undefined>): void {
-  const sanitized = stripProviderCredentialEnvironment(process.env);
+/** Exported for tests. Mutates process.env — production callers: executeToolTask only. */
+export function installProviderConnection(
+  tool: AgenticToolName,
+  connection: Record<string, string | undefined>
+): void {
+  // Strip only THIS tool's provider surface (fields + ambient aliases) so the
+  // resolved connection is the sole credential its SDK can see. Everything
+  // else — notably user-configured env vars like GITHUB_TOKEN — survives.
+  const sanitized = stripProviderCredentialEnvironment(process.env, tool);
   for (const key of Object.keys(process.env)) {
     if (!Object.hasOwn(sanitized, key)) delete process.env[key];
   }
   for (const [key, value] of Object.entries(connection)) {
     if (value?.trim()) process.env[key] = value;
+  }
+  // Keep AGOR_USER_ENV_KEYS truthful: drop names that no longer exist so MCP
+  // template resolution doesn't advertise vars this strip just removed.
+  const advertisedKeys = process.env[AGOR_USER_ENV_KEYS_VAR];
+  if (advertisedKeys) {
+    const remaining = advertisedKeys.split(',').filter((key) => process.env[key] !== undefined);
+    if (remaining.length > 0) {
+      process.env[AGOR_USER_ENV_KEYS_VAR] = remaining.join(',');
+    } else {
+      delete process.env[AGOR_USER_ENV_KEYS_VAR];
+    }
   }
 }
 
@@ -410,7 +432,7 @@ export async function executeToolTask(params: {
     ...(resolution.connection ?? {}),
     ...(resolution.apiKey ? { [apiKeyEnvVar]: resolution.apiKey } : {}),
   } as Record<string, string | undefined>;
-  installProviderConnection(connection);
+  installProviderConnection(toolName, connection);
 
   // Fail fast if stored key can't be decrypted (e.g. master secret changed)
   if (resolution.decryptionFailed) {

@@ -22,12 +22,40 @@ import {
   PROVIDER_CREDENTIAL_FIELDS,
 } from '../types';
 
-const PROVIDER_ENV_KEYS = new Set<string>([
-  ...Object.values(PROVIDER_CONNECTION_FIELDS).flat(),
-  'GOOGLE_API_KEY',
-  'GH_TOKEN',
-  'GITHUB_TOKEN',
-]);
+/**
+ * Ambient environment surface (beyond the tool's own connection fields) that
+ * can steer THAT tool's SDK toward a credential other than the resolved
+ * connection. Scoped per tool on purpose: `GITHUB_TOKEN` is a governance
+ * bypass for Copilot but a legitimate user-configured `gh`/git credential in
+ * every other session, and `AWS_*`/`GOOGLE_APPLICATION_CREDENTIALS` are inert
+ * for the Claude SDK once the `CLAUDE_CODE_USE_*` switches are stripped.
+ */
+const PROVIDER_AMBIENT_ENV: Record<
+  ProviderConnectionTool,
+  { keys: readonly string[]; prefixes: readonly string[] }
+> = {
+  'claude-code': {
+    keys: [
+      'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_USE_VERTEX',
+      'CLOUD_ML_REGION',
+      'VERTEX_REGION_CLAUDE_3_5_HAIKU',
+    ],
+    prefixes: ['ANTHROPIC_VERTEX_'],
+  },
+  codex: { keys: [], prefixes: [] },
+  gemini: {
+    // The Gemini CLI also authenticates via GOOGLE_API_KEY and Vertex ADC.
+    keys: ['GOOGLE_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_GENAI_USE_VERTEXAI'],
+    prefixes: [],
+  },
+  copilot: {
+    // The Copilot CLI falls back to ambient GH_TOKEN / GITHUB_TOKEN.
+    keys: ['GITHUB_TOKEN', 'GH_TOKEN'],
+    prefixes: [],
+  },
+  cursor: { keys: [], prefixes: [] },
+};
 
 export type ProviderConnectionSource = 'user' | 'tenant' | 'none';
 
@@ -168,22 +196,38 @@ export async function isTenantAgenticToolEnabled(
   return new TenantAgenticToolSettingsRepository(db).isEnabled(canonical);
 }
 
+/**
+ * Remove the running tool's provider-credential surface from an environment
+ * map so the policy-resolved connection is the ONLY credential that tool's
+ * SDK can see. Deliberately tool-scoped: user-configured env vars that are
+ * generic dev credentials for this session (GITHUB_TOKEN in a Claude session,
+ * AWS_* for terraform work, …) must survive — see the 2026-07-13 regression
+ * where a global strip deleted GITHUB_TOKEN from every session.
+ */
 export function stripProviderCredentialEnvironment<T extends Record<string, string | undefined>>(
-  input: T
+  input: T,
+  tool: AgenticToolName
 ): Record<string, string> {
+  const canonical = canonicalTenantAgenticTool(tool);
+  const stripKeys = new Set<string>();
+  const stripPrefixes: string[] = [];
+  if (isProviderConnectionTool(canonical)) {
+    for (const field of PROVIDER_CONNECTION_FIELDS[canonical]) {
+      stripKeys.add(field);
+    }
+    const ambient = PROVIDER_AMBIENT_ENV[canonical];
+    for (const key of ambient.keys) {
+      stripKeys.add(key);
+    }
+    stripPrefixes.push(...ambient.prefixes);
+  }
+
   const output: Record<string, string> = {};
   for (const [key, value] of Object.entries(input)) {
-    const isCloudProviderState =
-      key.startsWith('AWS_') ||
-      key.startsWith('ANTHROPIC_VERTEX_') ||
-      key === 'CLAUDE_CODE_USE_BEDROCK' ||
-      key === 'CLAUDE_CODE_USE_VERTEX' ||
-      key === 'GOOGLE_APPLICATION_CREDENTIALS' ||
-      key === 'CLOUD_ML_REGION' ||
-      key === 'VERTEX_REGION_CLAUDE_3_5_HAIKU';
-    if (value !== undefined && !PROVIDER_ENV_KEYS.has(key) && !isCloudProviderState) {
-      output[key] = value;
-    }
+    if (value === undefined) continue;
+    if (stripKeys.has(key)) continue;
+    if (stripPrefixes.some((prefix) => key.startsWith(prefix))) continue;
+    output[key] = value;
   }
   return output;
 }
