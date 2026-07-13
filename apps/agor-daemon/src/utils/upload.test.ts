@@ -2,7 +2,6 @@
  * Upload-middleware tests.
  *
  * The multer instance is opaque, so we exercise its config indirectly:
- *   - the exported MIME allowlist excludes dangerous types
  *   - the limits constants match what the prompt specifies
  *   - the live multer instance carries those limits
  *   - aggregate-size middlewares reject oversize requests (pre + post multer)
@@ -13,7 +12,7 @@ import path from 'node:path';
 import type { NextFunction, Request, Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  ALLOWED_UPLOAD_MIME_TYPES,
+  buildUploadFilename,
   createUploadMiddleware,
   enforceParsedTotalUploadSize,
   enforceTotalUploadSize,
@@ -37,22 +36,17 @@ function mockRes() {
   return res as Response & { _status?: number; _body?: unknown };
 }
 
-describe('upload allowlist', () => {
-  it('accepts common safe MIMEs', () => {
-    expect(ALLOWED_UPLOAD_MIME_TYPES.has('image/png')).toBe(true);
-    expect(ALLOWED_UPLOAD_MIME_TYPES.has('image/jpeg')).toBe(true);
-    expect(ALLOWED_UPLOAD_MIME_TYPES.has('text/plain')).toBe(true);
-    expect(ALLOWED_UPLOAD_MIME_TYPES.has('text/markdown')).toBe(true);
-    expect(ALLOWED_UPLOAD_MIME_TYPES.has('application/pdf')).toBe(true);
-  });
+describe('upload limits', () => {
+  it('generates distinct storage names for same-named files in the same millisecond', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
 
-  it('rejects HTML / executable / script-bearing MIMEs', () => {
-    expect(ALLOWED_UPLOAD_MIME_TYPES.has('text/html')).toBe(false);
-    expect(ALLOWED_UPLOAD_MIME_TYPES.has('application/x-msdownload')).toBe(false);
-    expect(ALLOWED_UPLOAD_MIME_TYPES.has('application/x-sh')).toBe(false);
-    expect(ALLOWED_UPLOAD_MIME_TYPES.has('application/javascript')).toBe(false);
-    // SVG is intentionally excluded — can carry inline <script>.
-    expect(ALLOWED_UPLOAD_MIME_TYPES.has('image/svg+xml')).toBe(false);
+    const first = buildUploadFilename('report.pdf');
+    const second = buildUploadFilename('report.pdf');
+
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/^report_1700000000000_[0-9a-f-]{36}\.pdf$/);
+    expect(second).toMatch(/^report_1700000000000_[0-9a-f-]{36}\.pdf$/);
+    vi.restoreAllMocks();
   });
 
   it('multer instance carries the configured limits', () => {

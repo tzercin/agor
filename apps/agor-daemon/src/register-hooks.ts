@@ -83,6 +83,8 @@ import { resolveForUserIdWithGate } from './oauth-auth-helpers.js';
 import type { ArtifactsService } from './services/artifacts.js';
 import type { GatewayService } from './services/gateway.js';
 import { groupMembershipsHooks, groupsHooks } from './services/groups.js';
+import { ingestParsedLinksAfterMessageCreate } from './services/links.js';
+import { linksHooks } from './services/links-hooks.js';
 import {
   isRemoteRelationshipsEnrichedResult,
   markRemoteRelationshipsEnrichedResult,
@@ -397,6 +399,7 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'session-relationships',
   'tasks',
   'messages',
+  'links',
   'boards',
   'boards/:id/archive',
   'boards/:id/unarchive',
@@ -573,7 +576,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     if (typeof branchId !== 'string' || branchId.length === 0) return;
     realtimeAccessCache.invalidateBranch(branchId);
     try {
-      const branch = await branchRepository.findById(branchId);
+      const branch = await branchRepository.findById(branchId as BranchID);
       if (branch) realtimeAccessCache.invalidateBranch(branch.branch_id);
     } catch {
       // Best-effort cache invalidation only.
@@ -739,6 +742,17 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // Helper to get usersService from app
   const usersService = app.service('users');
 
+  app.service('links').hooks(
+    linksHooks({
+      db,
+      branchRepository,
+      branchRbacEnabled,
+      requireAuth,
+      sessionsService,
+      superadminOpts,
+    })
+  );
+
   // ============================================================================
   // Messages hooks
   // ============================================================================
@@ -798,7 +812,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       ],
     },
     after: {
-      create: [gatewayRouteHook],
+      create: [gatewayRouteHook, ingestParsedLinksAfterMessageCreate(app)],
       patch: [
         async (context: HookContext<Board>) => {
           // Detect permission resolution and notify executor via IPC

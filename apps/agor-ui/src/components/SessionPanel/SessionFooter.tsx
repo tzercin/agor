@@ -66,7 +66,7 @@ export interface SessionFooterProps {
   stopRequestInFlight: boolean;
   hasInput: boolean;
   composerAttachmentsPresent?: boolean;
-  composerAttachmentUploading?: boolean;
+  composerBusy?: boolean;
   connectionDisabled: boolean;
   toolCaps?: { supportsSessionFork?: boolean; supportsChildSpawn?: boolean };
   // Settings state
@@ -115,7 +115,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   stopRequestInFlight,
   hasInput,
   composerAttachmentsPresent = false,
-  composerAttachmentUploading = false,
+  composerBusy = false,
   connectionDisabled,
   toolCaps,
   queuedTasks,
@@ -197,13 +197,15 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   }, [latestContextWindow]);
   const contextWarning = contextPct > 0.8;
   const composerAttachmentActionTooltip = 'Attachments are only supported for normal Send for now';
-  const composerUploadTooltip = 'Uploading files...';
-  const uploadDisabled = connectionDisabled || composerAttachmentUploading;
+  const composerBusyTooltip = 'Sending prompt...';
+  const uploadDisabled = connectionDisabled || composerBusy;
   const advancedUploadDisabled = uploadDisabled;
-  const forkDisabled = connectionDisabled || composerAttachmentsPresent;
-  const btwForkDisabled = connectionDisabled || !hasInput || composerAttachmentsPresent;
-  const spawnDisabled = connectionDisabled || isRunning || composerAttachmentsPresent;
-  const sendDisabled = connectionDisabled || composerAttachmentUploading || !hasInput;
+  const forkDisabled = connectionDisabled || composerBusy || composerAttachmentsPresent;
+  const btwForkDisabled =
+    connectionDisabled || composerBusy || !hasInput || composerAttachmentsPresent;
+  const spawnDisabled =
+    connectionDisabled || composerBusy || isRunning || composerAttachmentsPresent;
+  const sendDisabled = connectionDisabled || composerBusy || !hasInput;
 
   const sectionHeaderStyle: React.CSSProperties = {
     padding: '6px 12px 3px',
@@ -387,8 +389,8 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
       >
         <Tooltip
           title={
-            composerAttachmentUploading
-              ? composerUploadTooltip
+            composerBusy
+              ? composerBusyTooltip
               : connectionDisabled
                 ? 'Disconnected from daemon'
                 : 'Attach files to prompt'
@@ -486,8 +488,8 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
       >
         <Tooltip
           title={
-            composerAttachmentUploading
-              ? composerUploadTooltip
+            composerBusy
+              ? composerBusyTooltip
               : connectionDisabled
                 ? 'Disconnected from daemon'
                 : 'Upload files with options'
@@ -1217,8 +1219,8 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   const sendLabel = isRunning && hasInput ? 'Queue' : 'Send';
   const sendTooltip = connectionDisabled
     ? 'Disconnected from daemon'
-    : composerAttachmentUploading
-      ? composerUploadTooltip
+    : composerBusy
+      ? composerBusyTooltip
       : isRunning
         ? 'Queue Message'
         : 'Send Prompt';
@@ -1465,8 +1467,8 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
             {pinnedItems.includes('upload') && (
               <Tooltip
                 title={
-                  composerAttachmentUploading
-                    ? composerUploadTooltip
+                  composerBusy
+                    ? composerBusyTooltip
                     : connectionDisabled
                       ? 'Disconnected from daemon'
                       : 'Attach Files'
@@ -1487,8 +1489,8 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
             {pinnedItems.includes('advanced-upload') && (
               <Tooltip
                 title={
-                  composerAttachmentUploading
-                    ? composerUploadTooltip
+                  composerBusy
+                    ? composerBusyTooltip
                     : connectionDisabled
                       ? 'Disconnected from daemon'
                       : 'Advanced upload'

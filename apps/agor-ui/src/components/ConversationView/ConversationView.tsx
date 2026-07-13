@@ -10,7 +10,14 @@
  * - Auto-scrolling to latest content
  */
 
-import type { AgorClient, Message, PermissionScope, SessionID, User } from '@agor-live/client';
+import type {
+  AgorClient,
+  Link,
+  Message,
+  PermissionScope,
+  SessionID,
+  User,
+} from '@agor-live/client';
 import { shortId, TaskStatus } from '@agor-live/client';
 import { BranchesOutlined, CopyOutlined, ForkOutlined } from '@ant-design/icons';
 import { Alert, Button, Spin, Typography, theme } from 'antd';
@@ -121,6 +128,9 @@ export interface ConversationViewProps {
    */
   teammateEmoji?: string;
 
+  /** Upload links keyed by source user-message id. */
+  attachmentLinksByMessageId?: Map<string, Link[]>;
+
   /**
    * When true, all task blocks are force-expanded (used by in-session search)
    */
@@ -144,6 +154,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
     isActive = true,
     genealogy,
     teammateEmoji,
+    attachmentLinksByMessageId,
     forceExpandAll = false,
   }) => {
     const { token } = theme.useToken();
@@ -505,6 +516,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
               teammateEmoji={teammateEmoji}
               isLatestTask={taskIndex === tasks.length - 1}
               client={client}
+              attachmentLinksByMessageId={attachmentLinksByMessageId}
             />
           ))}
         </div>

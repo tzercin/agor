@@ -6,9 +6,13 @@
  * admin/owner and partial-RBAC-data cases.
  */
 
-import type { AgorClient, Branch, TeammateConfig, User } from '@agor-live/client';
-import { screen, waitFor } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import type { AgorClient, Branch, Link, TeammateConfig, User } from '@agor-live/client';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { EMPTY_MAPS } from '../../store/agorMaps';
+import { agorStore } from '../../store/agorStore';
+import { makeTestLink } from '../Links/testUtils';
 import { BranchModal } from './BranchModal';
 import { buildTeammateKnowledgePatch } from './tabs/KnowledgeTab';
 import {
@@ -20,6 +24,15 @@ import {
   renderWithApp,
 } from './testUtils';
 
+const makeLink = (overrides: Partial<Link> = {}) =>
+  makeTestLink({
+    branch_id: 'branch-1',
+    session_id: null,
+    url: 'https://example.com/runbook',
+    title: 'Runbook',
+    ...overrides,
+  });
+
 function renderBranchModal({
   branch = makeBranch(),
   currentUser,
@@ -30,19 +43,25 @@ function renderBranchModal({
   client: AgorClient;
 }) {
   return renderWithApp(
-    <BranchModal
-      open={true}
-      onClose={() => {}}
-      branch={branch}
-      repo={makeRepo()}
-      sessions={[]}
-      client={client}
-      currentUser={currentUser}
-    />
+    <MemoryRouter>
+      <BranchModal
+        open={true}
+        onClose={() => {}}
+        branch={branch}
+        repo={makeRepo()}
+        sessions={[]}
+        client={client}
+        currentUser={currentUser}
+      />
+    </MemoryRouter>
   );
 }
 
 describe('BranchModal — permissions tab visibility', () => {
+  beforeEach(() => {
+    agorStore.setState({ ...EMPTY_MAPS });
+  });
+
   it('shows Permissions for an admin user who is a branch owner', async () => {
     const seb = makeUser({ user_id: 'seb', role: 'admin' });
 
@@ -144,5 +163,28 @@ describe('BranchModal — permissions tab visibility', () => {
         },
       },
     });
+  });
+
+  it('hydrates the Links tab through the centralized full branch action and renders selector data', async () => {
+    const seb = makeUser({ user_id: 'seb', role: 'admin' });
+    const link = makeLink();
+    const { client, calls } = makeStubClient({ owners: [seb], users: [seb], links: [link] });
+
+    renderBranchModal({
+      currentUser: seb,
+      client,
+    });
+
+    fireEvent.click(await screen.findByRole('tab', { name: /links/i }));
+
+    await screen.findByText('Runbook');
+    const linkFind = calls.find((call) => call.service === 'links' && call.method === 'findAll');
+    expect(linkFind?.args[0]).toMatchObject({
+      query: {
+        owner_scope: 'branch',
+        branch_id: 'branch-1',
+      },
+    });
+    expect(agorStore.getState().linksByBranch.get('branch-1')).toEqual([link]);
   });
 });

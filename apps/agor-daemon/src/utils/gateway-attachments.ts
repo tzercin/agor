@@ -17,11 +17,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { InboundFile } from '@agor/core/gateway';
 import {
-  ALLOWED_UPLOAD_MIME_TYPES,
   buildUploadFilename,
   getUploadDirectory,
   MAX_UPLOAD_FILE_SIZE,
   MAX_UPLOAD_FILES_PER_REQUEST,
+  MAX_UPLOAD_TOTAL_SIZE,
 } from './upload.js';
 
 export interface AttachmentIngestResult {
@@ -32,6 +32,15 @@ export interface AttachmentIngestResult {
 }
 
 const MAX_REDIRECT_HOPS = 3;
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
+}
+
+async function rejectResponse(response: Response, message: string): Promise<never> {
+  await cancelResponseBody(response);
+  throw new Error(message);
+}
 
 /**
  * Whether a platform file URL may be downloaded with the channel's bot token.
@@ -51,43 +60,29 @@ export function isAllowedSlackFileUrl(rawUrl: string): boolean {
 }
 
 /**
- * MIME types the ingestion pipeline accepts: images and text-like files
- * (logs, plain text, CSV, JSON, markdown) agents use as context. Constrained
- * to the upload route's allowlist, which deliberately excludes script-bearing
- * types like image/svg+xml; the image/text prefix check additionally keeps
- * allowlisted-but-unsupported types (PDFs, office documents, archives) out of
- * ingestion.
+ * MIME types that are safe to ingest from a remote gateway and preview or pass
+ * as text context. Direct browser uploads intentionally remain unrestricted;
+ * this allowlist only protects bot-token gateway downloads.
  */
+const SAFE_GATEWAY_INGEST_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'application/json',
+]);
+
 function isAllowedIngestMime(rawMime: string): boolean {
   const mime = rawMime.split(';')[0].trim().toLowerCase();
-  if (!ALLOWED_UPLOAD_MIME_TYPES.has(mime)) return false;
-  return mime.startsWith('image/') || mime.startsWith('text/') || mime === 'application/json';
+  return SAFE_GATEWAY_INGEST_MIME_TYPES.has(mime);
 }
 
-/** Image and text-like attachments the ingestion pipeline accepts. */
+/** Safe gateway attachments accepted from inbound gateways. */
 export function isIngestableFile(file: InboundFile): boolean {
   return isAllowedIngestMime(file.mimetype);
-}
-
-/**
- * Fold stored attachment paths into a prompt.
- *
- * Server-side copy of the session composer's `buildPromptWithAttachments`
- * (`apps/agor-ui/src/components/SessionPanel/composerAttachments.ts`) — the
- * daemon must not import agor-ui. Keep the two in sync.
- */
-export function buildPromptWithAttachments(text: string, attachmentPaths: string[]): string {
-  const trimmedText = text.trim();
-  if (attachmentPaths.length === 0) return trimmedText;
-
-  const attachmentBlock = [
-    'Attached files:',
-    ...attachmentPaths.map((attachmentPath) => `- ${attachmentPath}`),
-  ].join('\n');
-  if (trimmedText.startsWith('/')) {
-    return `${trimmedText}\n\n${attachmentBlock}`;
-  }
-  return trimmedText ? `${attachmentBlock}\n\n${trimmedText}` : attachmentBlock;
 }
 
 /**
@@ -110,6 +105,7 @@ async function fetchFromAllowedHosts(
     const response = await fetchImpl(url, { headers, redirect: 'manual' });
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location');
+      await cancelResponseBody(response);
       if (!location) {
         throw new Error(`redirect (HTTP ${response.status}) without Location header`);
       }
@@ -157,13 +153,20 @@ export async function ingestInboundAttachments(args: {
   botToken: string;
   fetchImpl?: typeof fetch;
   uploadDir?: string;
+  maxTotalBytes?: number;
 }): Promise<AttachmentIngestResult> {
   const fetchImpl = args.fetchImpl ?? fetch;
   const uploadDir = args.uploadDir ?? getUploadDirectory();
+  const requestedMaxTotalBytes = args.maxTotalBytes;
+  const maxTotalBytes =
+    typeof requestedMaxTotalBytes === 'number' && Number.isFinite(requestedMaxTotalBytes)
+      ? Math.max(0, Math.min(requestedMaxTotalBytes, MAX_UPLOAD_TOTAL_SIZE))
+      : MAX_UPLOAD_TOTAL_SIZE;
 
   const ingestable = args.files.filter(isIngestableFile);
   const paths: string[] = [];
   let failed = 0;
+  let totalBytes = 0;
 
   for (const [index, file] of ingestable.entries()) {
     if (index >= MAX_UPLOAD_FILES_PER_REQUEST) {
@@ -180,6 +183,14 @@ export async function ingestInboundAttachments(args: {
       );
       continue;
     }
+    const remainingBytes = maxTotalBytes - totalBytes;
+    if (remainingBytes <= 0) {
+      failed++;
+      console.warn(
+        `[gateway] Skipping attachment "${file.name}": message exceeds aggregate size limit ${maxTotalBytes}`
+      );
+      continue;
+    }
     if (!isAllowedSlackFileUrl(file.url_private_download)) {
       failed++;
       console.warn(`[gateway] Skipping attachment "${file.name}": download URL host not allowed`);
@@ -193,7 +204,7 @@ export async function ingestInboundAttachments(args: {
         fetchImpl
       );
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        await rejectResponse(response, `HTTP ${response.status}`);
       }
       // Slack answers with an HTML login/error page (status 200) when the
       // token lacks files:read or cannot see the file — only accept response
@@ -201,15 +212,25 @@ export async function ingestInboundAttachments(args: {
       // text/html and script-bearing types like image/svg+xml).
       const contentType = response.headers.get('content-type') ?? '';
       if (!isAllowedIngestMime(contentType)) {
-        throw new Error(
+        await rejectResponse(
+          response,
           `unexpected content-type ${contentType.split(';')[0].trim().toLowerCase() || 'unknown'}`
         );
       }
       const declaredLength = Number.parseInt(response.headers.get('content-length') ?? '', 10);
       if (Number.isFinite(declaredLength) && declaredLength > MAX_UPLOAD_FILE_SIZE) {
-        throw new Error(`declared size ${declaredLength} exceeds per-file limit`);
+        await rejectResponse(response, `declared size ${declaredLength} exceeds per-file limit`);
       }
-      const body = await readBodyWithLimit(response, MAX_UPLOAD_FILE_SIZE);
+      if (Number.isFinite(declaredLength) && declaredLength > remainingBytes) {
+        await rejectResponse(
+          response,
+          `declared size ${declaredLength} exceeds remaining message limit`
+        );
+      }
+      const body = await readBodyWithLimit(
+        response,
+        Math.min(MAX_UPLOAD_FILE_SIZE, remainingBytes)
+      );
 
       await fs.mkdir(uploadDir, { recursive: true });
       // Slack names every pasted screenshot "image.png"; prefix the unique
@@ -218,6 +239,7 @@ export async function ingestInboundAttachments(args: {
       const filePath = path.join(uploadDir, buildUploadFilename(`${file.id}_${file.name}`));
       await fs.writeFile(filePath, body);
       paths.push(filePath);
+      totalBytes += body.byteLength;
     } catch (error) {
       failed++;
       console.warn(`[gateway] Failed to ingest attachment "${file.name}":`, error);

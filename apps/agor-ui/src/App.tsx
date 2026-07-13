@@ -10,6 +10,7 @@ import type {
   CreateRepoRequest,
   CreateUserInput,
   GatewayChannel,
+  LinkID,
   PermissionMode,
   Repo,
   Session,
@@ -728,7 +729,19 @@ function AppContent() {
               uploaded.files.map((file) => file.path)
             );
             if (finalPrompt.trim()) {
-              await handleSendPrompt(session.session_id, finalPrompt, config.permissionMode);
+              const uploadLinkIds = uploaded.files.flatMap((file) =>
+                file.linkId ? [file.linkId as LinkID] : []
+              );
+              if (uploadLinkIds.length > 0) {
+                await handleSendPrompt(
+                  session.session_id,
+                  finalPrompt,
+                  config.permissionMode,
+                  uploadLinkIds
+                );
+              } else {
+                await handleSendPrompt(session.session_id, finalPrompt, config.permissionMode);
+              }
             }
           } catch (error) {
             // Never silently drop the user's words: surface the upload failure
@@ -848,7 +861,8 @@ function AppContent() {
   const handleSendPrompt = async (
     sessionId: string,
     prompt: string,
-    permissionMode?: PermissionMode
+    permissionMode?: PermissionMode,
+    uploadLinkIds?: LinkID[]
   ): Promise<boolean> => {
     if (!client) return false;
 
@@ -856,6 +870,7 @@ function AppContent() {
       await client.sessions.prompt(sessionId, prompt, {
         permissionMode,
         messageSource: 'agor',
+        uploadLinkIds,
       });
 
       // Clear the draft after sending
