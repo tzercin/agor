@@ -196,6 +196,7 @@ function validateConfig(config: AgorConfig): void {
   const removedProviderConfig = config as AgorConfig & {
     credentials?: unknown;
     opencode?: unknown;
+    codex?: unknown;
     execution?: AgorConfig['execution'] & { cursor_sdk_enabled?: unknown };
   };
   if (removedProviderConfig.credentials !== undefined) {
@@ -206,6 +207,13 @@ function validateConfig(config: AgorConfig): void {
   if (removedProviderConfig.opencode !== undefined) {
     throw new Error(
       "Config error: 'opencode' has been removed. Configure OpenCode availability in workspace agentic-tool settings."
+    );
+  }
+  // Stale since #1136 (per-session CODEX_HOME removal); flagged here so
+  // upgrading installs get guidance instead of a generic unrecognized-key error.
+  if (removedProviderConfig.codex !== undefined) {
+    throw new Error(
+      "Config error: 'codex' has been removed. Codex home directories are managed per-session automatically."
     );
   }
   if (removedProviderConfig.execution?.cursor_sdk_enabled !== undefined) {
