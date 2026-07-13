@@ -5,13 +5,7 @@
  * Wraps @agor/core/config functions for UI access.
  */
 
-import {
-  type AgorConfig,
-  type ApiKeyName,
-  loadConfig,
-  resolveApiKey,
-  saveConfig,
-} from '@agor/core/config';
+import { type ApiKeyName, loadConfig, resolveApiKey } from '@agor/core/config';
 import type { TenantScopeAwareDatabase } from '@agor/core/db';
 import { type Application, BadRequest, Forbidden, NotAuthenticated } from '@agor/core/feathers';
 import {
@@ -101,34 +95,6 @@ export class ConfigService {
 
   constructor(db: TenantScopeAwareDatabase) {
     this.db = db;
-  }
-
-  /**
-   * Get full config (masked)
-   */
-  async find(_params?: Params): Promise<AgorConfig> {
-    return loadConfig();
-  }
-
-  /**
-   * Get specific config section or value
-   */
-  async get(id: string, _params?: Params): Promise<unknown> {
-    const config = await loadConfig();
-
-    // Support dot notation for the remaining bootstrap configuration.
-    const parts = id.split('.');
-    let value: unknown = config;
-
-    for (const part of parts) {
-      if (value && typeof value === 'object' && part in value) {
-        value = (value as Record<string, unknown>)[part];
-      } else {
-        return undefined;
-      }
-    }
-
-    return value;
   }
 
   /**
@@ -278,46 +244,6 @@ export class ConfigService {
       useNativeAuth: result.useNativeAuth,
       ...(result.decryptionFailed && { decryptionFailed: true }),
     };
-  }
-
-  /**
-   * Update config values
-   *
-   * Temporary compatibility surface for onboarding state only. Product settings
-   * must use tenant-owned typed services.
-   */
-  async patch(_id: null, data: Partial<AgorConfig>, _params?: Params): Promise<AgorConfig> {
-    // Log patch keys without values to avoid leaking secrets
-    const patchSections = Object.keys(data);
-    console.log(`[Config Service] Patch received: sections=[${patchSections}]`);
-    if (patchSections.some((section) => section !== 'onboarding')) {
-      throw new BadRequest('Only onboarding may be patched through the legacy config service');
-    }
-    const config = await loadConfig();
-
-    // Allow updating onboarding configuration
-    if (data.onboarding) {
-      if (!config.onboarding) {
-        config.onboarding = {};
-      }
-      const teammatePending =
-        data.onboarding.teammatePending ??
-        data.onboarding.assistantPending ??
-        data.onboarding.persistedAgentPending;
-      if (teammatePending !== undefined) {
-        config.onboarding.teammatePending = teammatePending;
-        delete config.onboarding.assistantPending;
-        delete config.onboarding.persistedAgentPending;
-      }
-      if (data.onboarding.frameworkRepoUrl !== undefined) {
-        config.onboarding.frameworkRepoUrl = data.onboarding.frameworkRepoUrl;
-      }
-    }
-
-    await saveConfig(config);
-    console.log('[Config Service] Config saved successfully');
-
-    return config;
   }
 }
 

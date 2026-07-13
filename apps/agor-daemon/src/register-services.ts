@@ -511,8 +511,6 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   configService.app = app;
   app.use('/admin/local-actions', createLocalActionsService());
 
-  app.use('/config', configService);
-
   app.use('/agentic-tool-settings', createTenantAgenticToolSettingsService(db));
   app.service('/agentic-tool-settings').hooks({ before: { all: [ctx.requireAuth] } });
   app.use('/agentic-tool-presets', createAgenticToolPresetsService(db));

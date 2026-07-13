@@ -20,25 +20,6 @@ export default class ConfigIndex extends Command {
       this.log(chalk.bold('\nCurrent Configuration'));
       this.log(chalk.dim('─'.repeat(50)));
 
-      // Global Defaults
-      this.log(chalk.bold('\nGlobal Defaults:'));
-      if (config.defaults?.board) {
-        this.log(`  default board: ${chalk.gray(config.defaults.board)}`);
-      }
-      if (config.defaults?.agent) {
-        this.log(`  default agent: ${chalk.gray(config.defaults.agent)}`);
-      }
-
-      // Display Settings
-      this.log(chalk.bold('\nDisplay Settings:'));
-      if (config.display?.tableStyle) {
-        this.log(`  table style:   ${chalk.gray(config.display.tableStyle)}`);
-      }
-      if (config.display?.colorOutput !== undefined) {
-        this.log(
-          `  color output:  ${chalk.gray(config.display.colorOutput ? 'enabled' : 'disabled')}`
-        );
-      }
       // Database Settings
       // Use the same centralized database URL resolution as the daemon
       const databaseUrl = getDatabaseUrl();
@@ -86,12 +67,6 @@ export default class ConfigIndex extends Command {
       // Available Configuration Keys
       this.log(chalk.bold('\nAvailable Configuration Keys:'));
       this.log(chalk.dim('  Use `agor config set <key> <value>` to set any of these:'));
-      this.log('');
-      this.log(chalk.cyan('  Defaults:'));
-      this.log('    defaults.board, defaults.agent');
-      this.log('');
-      this.log(chalk.cyan('  Display:'));
-      this.log('    display.tableStyle, display.colorOutput');
       this.log('');
       this.log(chalk.cyan('  Daemon:'));
       this.log('    daemon.port, daemon.host');

@@ -24,28 +24,6 @@ export type ManagedEnvsMinimumRole = 'none' | UserRole;
 export type UnknownJson = any;
 
 /**
- * Global default values
- */
-export interface AgorDefaults {
-  /** Default board for new sessions */
-  board?: string;
-
-  /** Default agent for new sessions */
-  agent?: string;
-}
-
-/**
- * Display settings
- */
-export interface AgorDisplaySettings {
-  /** Table style: unicode, ascii, or minimal */
-  tableStyle?: 'unicode' | 'ascii' | 'minimal';
-
-  /** Enable color output */
-  colorOutput?: boolean;
-}
-
-/**
  * Daemon settings
  */
 export interface AgorDaemonSettings {
@@ -931,20 +909,6 @@ export interface AgorAnalyticsModulePluginSettings {
 }
 
 /**
- * Onboarding settings (consumed by UI wizard; may be set by existing installs)
- */
-export interface AgorOnboardingSettings {
-  /** Whether AI teammate setup is pending (canonical key consumed by UI wizard) */
-  teammatePending?: boolean;
-  /** @deprecated Use teammatePending. Read for pre-rename config compatibility only. */
-  assistantPending?: boolean;
-  /** @deprecated Use teammatePending. Read for pre-rename config compatibility only. */
-  persistedAgentPending?: boolean;
-  /** Clone URL for the framework repo */
-  frameworkRepoUrl?: string;
-}
-
-/**
  * Branch-level defaults.
  *
  * Top-level `branches:` section (not under `execution:`) because these
@@ -976,6 +940,12 @@ export interface AgorBranchesSettings {
    * - `'write'` — full write access via branch group
    */
   others_fs_access_default?: 'none' | 'read' | 'write';
+}
+
+/** Operator-owned defaults for creating AI teammates. */
+export interface AgorTeammateSettings {
+  /** Repository cloned by the onboarding wizard when creating the first teammate. */
+  framework_repo_url?: string;
 }
 
 /**
@@ -1065,12 +1035,6 @@ export interface AgorMultiTenancySettings {
  * Complete Agor configuration
  */
 export interface AgorConfig {
-  /** Global defaults */
-  defaults?: AgorDefaults;
-
-  /** Display settings */
-  display?: AgorDisplaySettings;
-
   /** Daemon settings */
   daemon?: AgorDaemonSettings;
 
@@ -1092,6 +1056,9 @@ export interface AgorConfig {
   /** Branch-level defaults (others_can_default, others_fs_access_default) */
   branches?: AgorBranchesSettings;
 
+  /** Operator-owned teammate bootstrap settings. */
+  teammates?: AgorTeammateSettings;
+
   /** Path configuration (data_home for repos/branches separation) */
   paths?: AgorPathSettings;
 
@@ -1103,9 +1070,6 @@ export interface AgorConfig {
 
   /** Knowledge Base semantic search settings. */
   knowledge?: AgorKnowledgeSettings;
-
-  /** Onboarding settings (CLI init → UI wizard) */
-  onboarding?: AgorOnboardingSettings;
 
   /** App-level multi-tenancy settings. Defaults to static/default tenant. */
   multi_tenancy?: AgorMultiTenancySettings;
@@ -1125,8 +1089,6 @@ export interface AgorConfig {
  * Valid config keys (includes nested keys with dot notation)
  */
 export type ConfigKey =
-  | `defaults.${keyof AgorDefaults}`
-  | `display.${keyof AgorDisplaySettings}`
   | `daemon.${keyof AgorDaemonSettings}`
   | `ui.${keyof AgorUISettings}`
   | `database.${keyof AgorDatabaseSettings}`
@@ -1134,8 +1096,8 @@ export type ConfigKey =
   | `execution.${keyof AgorExecutionSettings}`
   | `security.${keyof AgorSecuritySettings}`
   | `branches.${keyof AgorBranchesSettings}`
+  | `teammates.${keyof AgorTeammateSettings}`
   | `paths.${keyof AgorPathSettings}`
   | `analytics.${keyof AgorAnalyticsSettings}`
   | `telemetry.${keyof AgorTelemetrySettings}`
-  | `knowledge.${keyof AgorKnowledgeSettings}`
-  | `onboarding.${keyof AgorOnboardingSettings}`;
+  | `knowledge.${keyof AgorKnowledgeSettings}`;

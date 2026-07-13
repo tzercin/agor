@@ -1820,15 +1820,6 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
   });
 
-  app.service('config').hooks({
-    before: {
-      all: [requireAuth],
-      find: [requireMinimumRole(ROLES.ADMIN, 'view configuration')],
-      get: [requireMinimumRole(ROLES.ADMIN, 'view configuration')],
-      patch: [requireMinimumRole(ROLES.ADMIN, 'update configuration')],
-    },
-  });
-
   safeService('context')?.hooks({
     before: {
       all: [requireAuth],

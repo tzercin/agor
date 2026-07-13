@@ -31,6 +31,7 @@ import {
   requirePublicBaseUrl,
   resolveBranchStorageConfig,
   resolveExecutionSecurityMode,
+  resolveTeammateFrameworkRepoUrl,
   saveConfig,
   setConfigValue,
   unsetConfigValue,
@@ -42,14 +43,6 @@ import type { AgorConfig } from './types';
  */
 function createConfigData(overrides?: Partial<AgorConfig>): AgorConfig {
   return {
-    defaults: {
-      board: 'test-board',
-      agent: 'test-agent',
-    },
-    display: {
-      tableStyle: 'ascii',
-      colorOutput: false,
-    },
     daemon: {
       port: 4000,
       host: '0.0.0.0',
@@ -90,15 +83,38 @@ describe('getDefaultConfig', () => {
     const defaults = getDefaultConfig();
 
     // Verify structure and key defaults
-    expect(defaults.defaults?.board).toBe('main');
-    expect(defaults.defaults?.agent).toBe('claude-code');
-    expect(defaults.display?.tableStyle).toBe('unicode');
-    expect(defaults.display?.colorOutput).toBe(true);
     expect(defaults.daemon?.port).toBe(3030);
     expect(defaults.daemon?.host).toBe('localhost');
     expect(defaults.ui?.port).toBe(5173);
     expect(defaults.ui?.host).toBe('localhost');
     expect(defaults.analytics?.enabled).toBe(false);
+  });
+});
+
+describe('resolveTeammateFrameworkRepoUrl', () => {
+  it('uses the operator-owned teammate setting', () => {
+    expect(
+      resolveTeammateFrameworkRepoUrl({
+        teammates: { framework_repo_url: 'https://example.test/canonical.git' },
+      })
+    ).toBe('https://example.test/canonical.git');
+  });
+
+  it('keeps the legacy onboarding key as a compatibility fallback', () => {
+    expect(
+      resolveTeammateFrameworkRepoUrl({
+        onboarding: { frameworkRepoUrl: 'https://example.test/legacy.git' },
+      } as unknown as AgorConfig)
+    ).toBe('https://example.test/legacy.git');
+  });
+
+  it('prefers the canonical setting over the legacy fallback', () => {
+    expect(
+      resolveTeammateFrameworkRepoUrl({
+        teammates: { framework_repo_url: 'https://example.test/canonical.git' },
+        onboarding: { frameworkRepoUrl: 'https://example.test/legacy.git' },
+      } as unknown as AgorConfig)
+    ).toBe('https://example.test/canonical.git');
   });
 });
 
@@ -256,13 +272,17 @@ describe('loadConfig', () => {
       configPath,
       yaml.dump({
         daemon: { allowAnonymous: false, requireAuth: true },
-        display: { shortIdLength: 12 },
+        defaults: { board: 'main', agent: 'claude-code' },
+        display: { shortIdLength: 12, tableStyle: 'ascii', colorOutput: false },
+        onboarding: { teammatePending: true, frameworkRepoUrl: 'https://example.test/repo.git' },
       }),
       'utf-8'
     );
     await expect(loadConfig()).resolves.toMatchObject({
       daemon: { allowAnonymous: false, requireAuth: true },
-      display: { shortIdLength: 12 },
+      defaults: { board: 'main', agent: 'claude-code' },
+      display: { shortIdLength: 12, tableStyle: 'ascii', colorOutput: false },
+      onboarding: { teammatePending: true, frameworkRepoUrl: 'https://example.test/repo.git' },
     });
   });
 
@@ -280,8 +300,6 @@ describe('loadConfig', () => {
 
     const loaded = await loadConfig();
     expect(loaded.daemon?.port).toBe(4040);
-    expect(loaded.defaults).toBeUndefined();
-    expect(loaded.display).toBeUndefined();
   });
 
   it('does not configure an external launch login redirect by default', async () => {
@@ -695,8 +713,8 @@ describe('saveConfig', () => {
     const content = await fs.readFile(configPath, 'utf-8');
 
     // Check that content is properly indented (2 spaces)
-    expect(content).toContain('defaults:');
-    expect(content).toContain('  board: ');
+    expect(content).toContain('daemon:');
+    expect(content).toContain('  port: ');
     expect(content).not.toContain('    '); // No 4-space indents (we use 2)
   });
 });
@@ -777,10 +795,8 @@ describe('getConfigValue', () => {
     await saveConfig(partialConfig);
 
     const customValue = await getConfigValue('daemon.port');
-    const defaultValue = await getConfigValue('display.tableStyle');
-
     expect(customValue).toBe(9999);
-    expect(defaultValue).toBe('unicode'); // From defaults
+    expect(await getConfigValue('display.tableStyle')).toBeUndefined();
   });
 
   it('should return undefined for non-existent keys', async () => {
@@ -790,20 +806,17 @@ describe('getConfigValue', () => {
     expect(value).toBeUndefined();
   });
 
-  it('should handle boolean values', async () => {
-    const config = createConfigData();
-    await saveConfig(config);
+  it('ignores retired display settings from an existing config file', async () => {
+    await saveConfig({
+      defaults: { board: 'legacy', agent: 'legacy-agent' },
+      display: { tableStyle: 'ascii', colorOutput: false },
+      onboarding: { teammatePending: true },
+    } as unknown as AgorConfig);
 
-    const colorOutput = await getConfigValue('display.colorOutput');
-    expect(colorOutput).toBe(false);
-  });
-
-  it('should handle string values', async () => {
-    const config = createConfigData();
-    await saveConfig(config);
-
-    const tableStyle = await getConfigValue('display.tableStyle');
-    expect(tableStyle).toBe('ascii');
+    expect(await getConfigValue('defaults.board')).toBeUndefined();
+    expect(await getConfigValue('display.tableStyle')).toBeUndefined();
+    expect(await getConfigValue('display.colorOutput')).toBeUndefined();
+    expect(await getConfigValue('onboarding.teammatePending')).toBeUndefined();
   });
 
   it('should handle number values', async () => {
@@ -825,6 +838,14 @@ describe('setConfigValue', () => {
     vi.spyOn(os, 'homedir').mockReturnValue(tempDir);
   });
 
+  it.each([
+    'display.tableStyle',
+    'display.colorOutput',
+    'display.shortIdLength',
+  ])('rejects newly setting retired key %s', async (key) => {
+    await expect(setConfigValue(key, 'legacy')).rejects.toThrow(/has been retired/);
+  });
+
   afterEach(async () => {
     await fs.rm(tempDir, { recursive: true, force: true });
     vi.restoreAllMocks();
@@ -838,12 +859,19 @@ describe('setConfigValue', () => {
     expect(value).toBe(8888);
   });
 
-  it('should create section if it does not exist', async () => {
-    await saveConfig({});
-    await setConfigValue('onboarding.teammatePending', true);
+  it('rejects retired defaults and onboarding keys', async () => {
+    await expect(setConfigValue('onboarding.teammatePending', true)).rejects.toThrow(
+      /has been retired/
+    );
+    await expect(setConfigValue('defaults.board', 'custom-board')).rejects.toThrow(
+      /has been retired/
+    );
+  });
 
-    const loaded = await loadConfig();
-    expect(loaded.onboarding?.teammatePending).toBe(true);
+  it('directs new framework repository writes to the canonical operator key', async () => {
+    await expect(
+      setConfigValue('onboarding.frameworkRepoUrl', 'https://example.test/framework.git')
+    ).rejects.toThrow(/set teammates\.framework_repo_url instead/);
   });
 
   it('should update existing value', async () => {
@@ -854,14 +882,6 @@ describe('setConfigValue', () => {
 
     const value = await getConfigValue('daemon.port');
     expect(value).toBe(7777);
-  });
-
-  it('should handle string values', async () => {
-    await saveConfig({});
-    await setConfigValue('defaults.board', 'custom-board');
-
-    const value = await getConfigValue('defaults.board');
-    expect(value).toBe('custom-board');
   });
 
   it('should handle boolean values', async () => {
@@ -904,8 +924,6 @@ describe('setConfigValue', () => {
 
     const loaded = await loadConfig();
     expect(loaded.daemon?.port).toBe(5555);
-    expect(loaded.display).toMatchObject(config.display!);
-    expect(loaded.defaults).toMatchObject(config.defaults!);
   });
 });
 
@@ -962,8 +980,7 @@ describe('unsetConfigValue', () => {
     await unsetConfigValue('daemon.port');
 
     const loaded = await loadConfig();
-    expect(loaded.display).toMatchObject(config.display!);
-    expect(loaded.defaults).toMatchObject(config.defaults!);
+    expect(loaded.ui).toEqual(config.ui);
   });
 
   it('should throw error for top-level keys', async () => {
@@ -1045,10 +1062,7 @@ describe('getDaemonUrl', () => {
   });
 
   it('should handle partial config with missing daemon section', async () => {
-    const config: AgorConfig = {
-      defaults: { board: 'main' },
-      // No daemon section
-    };
+    const config: AgorConfig = {};
     await saveConfig(config);
 
     const url = await getDaemonUrl();

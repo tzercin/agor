@@ -11,6 +11,7 @@ import {
   isTenantAgenticToolEnabled,
   resolveBranchStorageConfig,
   resolveMultiTenancyConfig,
+  resolveTeammateFrameworkRepoUrl,
   resolveTenantContext,
 } from '@agor/core/config';
 import {
@@ -3758,15 +3759,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           label: config.daemon?.instanceLabel,
           description: config.daemon?.instanceDescription,
         },
-        onboarding: {
-          teammatePending:
-            config.onboarding?.teammatePending ??
-            config.onboarding?.assistantPending ??
-            config.onboarding?.persistedAgentPending ??
-            false,
-          frameworkRepoUrl: config.onboarding?.frameworkRepoUrl,
-        },
         features: {
+          teammateFrameworkRepoUrl: resolveTeammateFrameworkRepoUrl(config),
           // Web terminal availability: UI should hide terminal buttons when false.
           // Server-side gate in register-hooks.ts is the source of truth; this
           // flag exists so the UI can skip rendering buttons that would fail.

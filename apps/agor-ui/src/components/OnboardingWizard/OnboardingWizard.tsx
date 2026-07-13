@@ -116,8 +116,6 @@ export interface OnboardingWizardProps {
   onUpdateUser: (userId: string, updates: UpdateUserInput) => Promise<void>;
   onUpdateBranch?: (branchId: string, updates: Partial<Branch>) => Promise<void>;
   onCheckAuth?: (tool: AgenticToolName, apiKey?: string) => Promise<AuthCheckResult>;
-
-  teammatePending?: boolean;
   frameworkRepoUrl?: string;
 }
 
@@ -277,8 +275,6 @@ export function OnboardingWizard({
   const clonePollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const completingRepoRef = useRef<string | null>(null);
   const knownFailedRepoIdsRef = useRef<Set<string>>(new Set());
-  const effectiveFrameworkUrl = frameworkRepoUrl || FRAMEWORK_REPO_URL;
-
   const defaultBranchName = useMemo(
     () => defaultTeammateBranchName(teammateDisplayName),
     [teammateDisplayName]
@@ -696,7 +692,7 @@ export function OnboardingWizard({
     try {
       const cloneResult = await onCreateRepo(
         {
-          url: effectiveFrameworkUrl,
+          url: frameworkRepoUrl || FRAMEWORK_REPO_URL,
           slug: FRAMEWORK_REPO_SLUG,
           default_branch: 'main',
         },
@@ -742,9 +738,9 @@ export function OnboardingWizard({
       setError(err instanceof Error ? err.message : String(err));
     }
   }, [
-    effectiveFrameworkUrl,
     fetchExistingFrameworkRepo,
     finishSetupFromRepo,
+    frameworkRepoUrl,
     onCreateRepo,
     pollRepoUntilReady,
     repoById,
