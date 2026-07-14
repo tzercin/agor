@@ -99,33 +99,42 @@ export async function createExecutorClient(
     }
   };
 
-  let reauthenticating = false;
-  const reauthenticateSocket = async (label: string): Promise<boolean> => {
-    if (reauthenticating) return true;
-    reauthenticating = true;
-    try {
-      // Try reAuthenticate first — uses stored credentials from MemoryStorage
-      await client.reAuthenticate(true);
-      console.log(`[executor] Re-authenticated successfully after ${label}`);
-      resetServerDisconnectRecovery();
-      return true;
-    } catch {
-      // Fallback: authenticate with raw JWT if storage-based re-auth fails
+  // Coalesce concurrent re-auth requests: an access-token expiry can reject
+  // many in-flight acks at once (each landing in the error interceptor below).
+  // Share a single re-auth promise so they all await the same result instead of
+  // racing — and so callers get the REAL outcome rather than an optimistic
+  // "already in progress" true (which would let a retry fire before the socket
+  // is actually re-authenticated).
+  let reauthPromise: Promise<boolean> | null = null;
+  const reauthenticateSocket = (label: string): Promise<boolean> => {
+    if (reauthPromise) return reauthPromise;
+    reauthPromise = (async (): Promise<boolean> => {
       try {
-        await client.authenticate({
-          strategy: 'jwt',
-          accessToken: sessionToken,
-        });
-        console.log(`[executor] Re-authenticated with JWT fallback after ${label}`);
+        // Try reAuthenticate first — uses stored credentials from MemoryStorage
+        await client.reAuthenticate(true);
+        console.log(`[executor] Re-authenticated successfully after ${label}`);
         resetServerDisconnectRecovery();
         return true;
-      } catch (error) {
-        console.error(`[executor] Re-authentication failed after ${label}:`, error);
-        return false;
+      } catch {
+        // Fallback: authenticate with the long-lived session token if the
+        // stored (now-expired) access token can't be refreshed.
+        try {
+          await client.authenticate({
+            strategy: 'jwt',
+            accessToken: sessionToken,
+          });
+          console.log(`[executor] Re-authenticated with JWT fallback after ${label}`);
+          resetServerDisconnectRecovery();
+          return true;
+        } catch (error) {
+          console.error(`[executor] Re-authentication failed after ${label}:`, error);
+          return false;
+        }
+      } finally {
+        reauthPromise = null;
       }
-    } finally {
-      reauthenticating = false;
-    }
+    })();
+    return reauthPromise;
   };
 
   const scheduleServerDisconnectReconnect = () => {
@@ -250,6 +259,95 @@ export async function createExecutorClient(
     logSocketEvent('reconnected', `attempt ${attemptNumber}; re-authenticating`);
     await reauthenticateSocket('reconnect');
   });
+
+  // Recover from access-token expiry on a LIVE (still-connected) socket.
+  //
+  // The daemon mints short-lived access tokens (15m). A long executor turn can
+  // outlive that TTL while the socket stays open, so the token expires WITHOUT
+  // a disconnect. The next service call's ack then rejects with a 401
+  // NotAuthenticated error, and — with no disconnect/reconnect event to drive
+  // the handlers above — it bubbles up unhandled, kills the executor (exit 1),
+  // and the daemon marks the session `failed`. Intercept that 401 here,
+  // re-authenticate with the long-lived session token, and transparently retry
+  // the call once.
+  const REAUTH_RETRY_FLAG = '__executorReauthRetried';
+  client.hooks({
+    error: {
+      all: [
+        async (rawContext) => {
+          const context = rawContext as unknown as {
+            path?: string;
+            method?: string;
+            service: Record<string, (...args: unknown[]) => Promise<unknown>>;
+            params?: Record<string, unknown>;
+            id?: unknown;
+            data?: unknown;
+            result?: unknown;
+            error?: { code?: number; name?: string } | null;
+          };
+
+          // Never intercept the authentication service itself:
+          // reauthenticateSocket() calls it, so retrying here would recurse.
+          if (context.path === 'authentication') return rawContext;
+
+          const isAuthError =
+            context.error?.code === 401 || context.error?.name === 'NotAuthenticated';
+          if (!isAuthError) return rawContext;
+
+          const params = context.params ?? {};
+          if (params[REAUTH_RETRY_FLAG]) return rawContext; // already retried once
+
+          logSocketEvent('live_request_auth_expired', `${context.path}.${context.method}`);
+          const reauthenticated = await reauthenticateSocket('live request 401');
+          if (!reauthenticated) return rawContext;
+
+          const retryParams = { ...params, [REAUTH_RETRY_FLAG]: true };
+          const service = context.service;
+          try {
+            switch (context.method) {
+              case 'find':
+                context.result = await service.find(retryParams);
+                break;
+              case 'get':
+                context.result = await service.get(context.id, retryParams);
+                break;
+              case 'create':
+                context.result = await service.create(context.data, retryParams);
+                break;
+              case 'update':
+                context.result = await service.update(context.id, context.data, retryParams);
+                break;
+              case 'patch':
+                context.result = await service.patch(context.id, context.data, retryParams);
+                break;
+              case 'remove':
+                context.result = await service.remove(context.id, retryParams);
+                break;
+              default:
+                // Unknown/custom method: don't blind-retry, just surface the error.
+                return rawContext;
+            }
+            // Swallow the original error now that the retry succeeded. Feathers
+            // returns context.result (now defined) instead of throwing.
+            context.error = null;
+          } catch (retryError) {
+            context.error = retryError as { code?: number; name?: string };
+          }
+          return rawContext;
+        },
+      ],
+    },
+  });
+
+  // Proactively refresh the access token well before its ~15m TTL so a live
+  // socket never carries an expired token into a request. Belt-and-suspenders
+  // alongside the 401 interceptor above.
+  const PROACTIVE_REAUTH_INTERVAL_MS = 10 * 60 * 1000;
+  const proactiveReauthTimer = setInterval(() => {
+    void reauthenticateSocket('proactive refresh');
+  }, PROACTIVE_REAUTH_INTERVAL_MS);
+  // Don't let the refresh timer keep the process alive after the task finishes.
+  proactiveReauthTimer.unref?.();
 
   return client;
 }
