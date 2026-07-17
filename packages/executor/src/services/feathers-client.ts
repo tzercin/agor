@@ -13,6 +13,116 @@ export type { AgorClient } from '@agor/core/api';
 const DEBUG_FEATHERS_CLIENT =
   process.env.AGOR_DEBUG_FEATHERS_CLIENT === '1' || process.env.DEBUG?.includes('feathers-client');
 
+/**
+ * Coalesce concurrent invocations behind a single shared promise.
+ *
+ * An access-token expiry on a live socket can reject many in-flight acks at
+ * once — each landing in the 401 error hook and each wanting to re-authenticate.
+ * Wrapping the re-auth in single-flight makes that burst drive ONE re-auth: the
+ * first caller runs it, every concurrent caller awaits the same promise, and
+ * they all observe the REAL outcome (not an optimistic "already in progress"
+ * true that would let a retry fire before the socket is actually
+ * re-authenticated). The slot is released once the promise settles, so a later
+ * expiry re-authenticates again.
+ */
+export function singleFlight<T>(fn: () => Promise<T>): () => Promise<T> {
+  let inFlight: Promise<T> | null = null;
+  return () => {
+    if (inFlight) return inFlight;
+    const promise = (async () => fn())().finally(() => {
+      if (inFlight === promise) inFlight = null;
+    });
+    inFlight = promise;
+    return promise;
+  };
+}
+
+/** The Feathers error-hook context fields the live-401 recovery reads/writes. */
+export interface LiveAuthErrorContext {
+  path?: string;
+  method?: string;
+  service: Record<string, (...args: unknown[]) => Promise<unknown>>;
+  params?: Record<string, unknown>;
+  id?: unknown;
+  data?: unknown;
+  result?: unknown;
+  error?: { code?: number; name?: string } | null;
+}
+
+// Marks a request that has already been retried once after a re-auth, so a
+// second consecutive 401 surfaces instead of looping forever.
+const REAUTH_RETRY_FLAG = '__executorReauthRetried';
+
+/**
+ * Recover from an access-token expiry on a LIVE (still-connected) socket.
+ *
+ * The daemon mints short-lived access tokens. A long executor turn can outlive
+ * that TTL while the socket stays open, so the token expires WITHOUT a
+ * disconnect. The next service call's ack then rejects with a 401
+ * NotAuthenticated error and — with no disconnect/reconnect event to drive the
+ * socket handlers — it would bubble up unhandled, kill the executor (exit 1),
+ * and the daemon would mark the session `failed`.
+ *
+ * This is a method-agnostic, one-shot recovery: on a 401 it re-authenticates
+ * (via the caller-supplied single-flight `reauthenticate`) and transparently
+ * replays the original call once with the retry flag set. Ported from the
+ * reviewed UI-side pattern in #1058. It never intercepts the `authentication`
+ * service (the re-auth path itself) and never blind-retries custom methods.
+ */
+export async function recoverFromLiveAuthError(
+  context: LiveAuthErrorContext,
+  reauthenticate: (label: string) => Promise<boolean>,
+  onExpired?: (detail: string) => void
+): Promise<LiveAuthErrorContext> {
+  // Never intercept the authentication service itself: reauthenticate() calls
+  // it, so retrying here would recurse.
+  if (context.path === 'authentication') return context;
+
+  const isAuthError = context.error?.code === 401 || context.error?.name === 'NotAuthenticated';
+  if (!isAuthError) return context;
+
+  const params = context.params ?? {};
+  if (params[REAUTH_RETRY_FLAG]) return context; // already retried once
+
+  onExpired?.(`${context.path}.${context.method}`);
+  const reauthenticated = await reauthenticate('live request 401');
+  if (!reauthenticated) return context;
+
+  const retryParams = { ...params, [REAUTH_RETRY_FLAG]: true };
+  const service = context.service;
+  try {
+    switch (context.method) {
+      case 'find':
+        context.result = await service.find(retryParams);
+        break;
+      case 'get':
+        context.result = await service.get(context.id, retryParams);
+        break;
+      case 'create':
+        context.result = await service.create(context.data, retryParams);
+        break;
+      case 'update':
+        context.result = await service.update(context.id, context.data, retryParams);
+        break;
+      case 'patch':
+        context.result = await service.patch(context.id, context.data, retryParams);
+        break;
+      case 'remove':
+        context.result = await service.remove(context.id, retryParams);
+        break;
+      default:
+        // Unknown/custom method: don't blind-retry, just surface the error.
+        return context;
+    }
+    // Swallow the original error now that the retry succeeded. Feathers returns
+    // context.result (now defined) instead of throwing.
+    context.error = null;
+  } catch (retryError) {
+    context.error = retryError as { code?: number; name?: string };
+  }
+  return context;
+}
+
 const SERVER_DISCONNECT_RECONNECT_BASE_DELAY_MS = 1000;
 const SERVER_DISCONNECT_RECONNECT_MAX_DELAY_MS = 30_000;
 const SERVER_DISCONNECT_RECONNECT_MAX_ATTEMPTS = 8;
@@ -112,10 +222,12 @@ export async function createExecutorClient(
     }
   };
 
-  let reauthenticating = false;
-  const reauthenticateSocket = async (label: string): Promise<boolean> => {
-    if (reauthenticating) return true;
-    reauthenticating = true;
+  // Coalesce concurrent re-auth requests behind one shared promise so a burst
+  // of rejected acks from a single token expiry drives exactly one re-auth and
+  // every caller observes the real outcome. See singleFlight() for the rationale.
+  let reauthLabel = 'reconnect';
+  const runReauthenticate = singleFlight(async (): Promise<boolean> => {
+    const label = reauthLabel;
     try {
       // Try reAuthenticate first — uses stored credentials from MemoryStorage
       await client.reAuthenticate(true);
@@ -138,9 +250,11 @@ export async function createExecutorClient(
         console.error(`[executor] Re-authentication failed after ${label}:`, error);
         return false;
       }
-    } finally {
-      reauthenticating = false;
     }
+  });
+  const reauthenticateSocket = (label: string): Promise<boolean> => {
+    reauthLabel = label;
+    return runReauthenticate();
   };
 
   const scheduleServerDisconnectReconnect = () => {
@@ -264,6 +378,22 @@ export async function createExecutorClient(
   client.io.io.on('reconnect', async (attemptNumber: number) => {
     logSocketEvent('reconnected', `attempt ${attemptNumber}; re-authenticating`);
     await reauthenticateSocket('reconnect');
+  });
+
+  // Recover from access-token expiry on a LIVE (still-connected) socket, where
+  // no disconnect/reconnect event fires to drive the handlers above. See
+  // recoverFromLiveAuthError() for the failure chain this closes.
+  client.hooks({
+    error: {
+      all: [
+        async (rawContext) =>
+          recoverFromLiveAuthError(
+            rawContext as unknown as LiveAuthErrorContext,
+            reauthenticateSocket,
+            (detail) => logSocketEvent('live_request_auth_expired', detail)
+          ) as unknown as typeof rawContext,
+      ],
+    },
   });
 
   return client;
