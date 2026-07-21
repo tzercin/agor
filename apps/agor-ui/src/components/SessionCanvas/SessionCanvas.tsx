@@ -1024,27 +1024,52 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // logical `artifact_id` on `data.artifactId`). Rather than thread a
     // boardObjectById lookup through every caller, we accept the logical
     // id and fall back to a `data.artifactId` scan when `getNode` misses.
-    const recenterOnNode = useCallback((nodeId: string): boolean => {
-      const instance = reactFlowInstanceRef.current;
-      if (!instance) return false;
-      const allNodes = instance.getNodes();
-      let node = instance.getNode(nodeId);
-      if (!node) {
-        // Logical-id fallback: artifact callers pass artifact_id; find
-        // the node whose data references it. Extendable to other
-        // logical-id mismatches in the future.
-        node = allNodes.find((n) => n.data?.artifactId === nodeId);
-      }
-      if (!node) return false;
-      const absPos = getNodeAbsolutePosition(node, allNodes);
-      const width = node.width ?? 500;
-      const height = node.height ?? 200;
-      instance.setCenter(absPos.x + width / 2, absPos.y + height / 2, {
-        zoom: instance.getZoom(),
-        duration: 400,
-      });
-      return true;
-    }, []);
+    const recenterOnNode = useCallback(
+      (nodeId: string, subTarget?: { sessionId?: string }): boolean => {
+        const instance = reactFlowInstanceRef.current;
+        if (!instance) return false;
+        const allNodes = instance.getNodes();
+        let node = instance.getNode(nodeId);
+        if (!node) {
+          // Logical-id fallback: artifact callers pass artifact_id; find
+          // the node whose data references it. Extendable to other
+          // logical-id mismatches in the future.
+          node = allNodes.find((n) => n.data?.artifactId === nodeId);
+        }
+        if (!node) return false;
+        const absPos = getNodeAbsolutePosition(node, allNodes);
+        const width = node.width ?? 500;
+        const height = node.height ?? 200;
+        const zoom = instance.getZoom() || 1;
+        const centerX = absPos.x + width / 2;
+        let centerY = absPos.y + height / 2;
+        // Session sub-target: aim at the session row inside the card
+        // instead of the card center, so selecting a session lands the
+        // camera on that item rather than the card head. Measured from
+        // the DOM (row offset within the node wrapper, screen px → flow
+        // units via zoom); falls back to card center when the row isn't
+        // rendered (collapsed tree, session not on this card).
+        if (subTarget?.sessionId) {
+          const nodeEl = document.querySelector(
+            `.react-flow__node[data-id="${CSS.escape(node.id)}"]`
+          );
+          const rowEl = nodeEl?.querySelector(
+            `[data-session-id="${CSS.escape(subTarget.sessionId)}"]`
+          );
+          if (nodeEl && rowEl) {
+            const nodeRect = nodeEl.getBoundingClientRect();
+            const rowRect = rowEl.getBoundingClientRect();
+            centerY = absPos.y + (rowRect.top - nodeRect.top + rowRect.height / 2) / zoom;
+          }
+        }
+        instance.setCenter(centerX, centerY, {
+          zoom: instance.getZoom(),
+          duration: 400,
+        });
+        return true;
+      },
+      []
+    );
 
     useRegisterRecenter(recenterOnNode);
 
@@ -1480,8 +1505,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         // lives on this (newly-loaded) board, honor it instead of fitView.
         // Falls back to fitView when the pending target isn't on this board
         // either (stale/unknown id).
-        const pendingId = consumePendingRecenter();
-        if (pendingId && recenterOnNode(pendingId)) {
+        const pending = consumePendingRecenter();
+        if (pending && recenterOnNode(pending.nodeId, { sessionId: pending.sessionId })) {
           lastFitBoardIdRef.current = board?.board_id ?? null;
           return;
         }
@@ -2392,6 +2417,20 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     ]);
 
     // Node click handler for eraser mode and comment placement
+    // Double-clicking a branch card pans the camera onto it — the same
+    // movement as the "Go to card on board" locator button. When the
+    // double-click lands on a session row inside the card, aim at that
+    // row instead so the gesture agrees with single-click selection.
+    const handleNodeDoubleClick = useCallback(
+      (event: React.MouseEvent, node: Node) => {
+        if (node.type !== 'branchNode') return;
+        const row = (event.target as HTMLElement | null)?.closest?.('[data-session-id]');
+        const sessionId = row?.getAttribute('data-session-id') ?? undefined;
+        recenterOnNode(node.id, { sessionId });
+      },
+      [recenterOnNode]
+    );
+
     const handleNodeClick = useCallback(
       (event: React.MouseEvent, node: Node) => {
         if (activeTool === 'eraser') {
@@ -2518,6 +2557,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             onNodeDrag={handleNodeDrag}
             onNodeDragStop={handleNodeDragStop}
             onNodeClick={handleNodeClick}
+            onNodeDoubleClick={handleNodeDoubleClick}
             onPaneClick={handlePaneClick}
             onInit={(instance) => {
               reactFlowInstanceRef.current = instance;
@@ -2546,6 +2586,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // Disable React Flow's keyboard shortcuts that conflict with typing/spatial messages.
             // Keep modifier-scroll zoom enabled so Command/Control + scroll behaves like Figma.
             deleteKeyCode={null}
+            // Double-click recenters branch cards (onNodeDoubleClick above);
+            // d3-zoom's dblclick.zoom would fight that animation, so the
+            // default double-click zoom is disabled.
+            zoomOnDoubleClick={false}
             selectionKeyCode={null}
             multiSelectionKeyCode={null}
             panActivationKeyCode={null}

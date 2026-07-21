@@ -26,16 +26,24 @@ import {
  * different board. The hook stashes the target, asks App to switch boards,
  * and the new SessionCanvas drains the pending target once its nodes load.
  *
+ * Sub-target: pass `opts.sessionId` to aim the camera at a specific
+ * session row rendered inside the target card (the genealogy-tree item)
+ * instead of the card's center. The canvas measures the row's DOM
+ * position and falls back to the card center when the row isn't
+ * rendered (collapsed tree, session not on this card).
+ *
  * Returns `true` if the camera moved synchronously or a cross-board hop is
  * in flight, `false` otherwise (no canvas mounted, unknown id, no
  * switcher).
  */
-export type RecenterMapFn = (nodeId: string) => boolean;
-export type RecenterOpts = { boardId?: string };
+export type RecenterSubTarget = { sessionId?: string };
+export type RecenterMapFn = (nodeId: string, subTarget?: RecenterSubTarget) => boolean;
+export type RecenterOpts = { boardId?: string; sessionId?: string };
 export type BoardSwitcherFn = (boardId: string) => void;
 
 interface PendingRecenter {
   nodeId: string;
+  sessionId?: string;
   expiresAt: number;
 }
 
@@ -90,8 +98,11 @@ export function useRegisterBoardSwitcher(fn: BoardSwitcherFn): void {
 }
 
 /** SessionCanvas drains the stash once its new board's nodes are ready.
- *  Returns the pending node id (and clears it) if one is live, else null. */
-export function useConsumePendingRecenter(): () => string | null {
+ *  Returns the pending target (and clears it) if one is live, else null. */
+export function useConsumePendingRecenter(): () => {
+  nodeId: string;
+  sessionId?: string;
+} | null {
   const ctx = useContext(CanvasNavigationContext);
   return useCallback(() => {
     const pending = ctx?.pendingRef.current;
@@ -101,7 +112,7 @@ export function useConsumePendingRecenter(): () => string | null {
       return null;
     }
     ctx!.pendingRef.current = null;
-    return pending.nodeId;
+    return { nodeId: pending.nodeId, sessionId: pending.sessionId };
   }, [ctx]);
 }
 
@@ -114,12 +125,13 @@ export function useRecenterMap(): (nodeId: string, opts?: RecenterOpts) => boole
       // Try a synchronous recenter first — covers the common case where the
       // target is on the visible board (or the caller didn't bother to look
       // up `boardId`).
-      const sync = ctx.recenterRef.current?.(nodeId);
+      const sync = ctx.recenterRef.current?.(nodeId, { sessionId: opts?.sessionId });
       if (sync) return true;
       // Cross-board: stash + switch if we have a target board and a switcher.
       if (opts?.boardId && ctx.boardSwitcherRef.current) {
         ctx.pendingRef.current = {
           nodeId,
+          sessionId: opts?.sessionId,
           expiresAt: Date.now() + PENDING_TTL_MS,
         };
         ctx.boardSwitcherRef.current(opts.boardId);
