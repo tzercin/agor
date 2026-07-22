@@ -46,6 +46,14 @@ export type AgenticToolName =
   | 'copilot'
   | 'cursor';
 
+export const NON_EXECUTOR_AGENTIC_TOOLS: ReadonlySet<AgenticToolName> = new Set([
+  'claude-code-cli',
+]);
+
+export function usesExecutorRuntime(tool: AgenticToolName): boolean {
+  return !NON_EXECUTOR_AGENTIC_TOOLS.has(tool);
+}
+
 /**
  * Agentic tool metadata for UI display
  *

@@ -27,6 +27,7 @@ import { createFeathersBackedRepositories } from '../../db/feathers-repositories
 import { getCurrentBranch, getGitState } from '../../git/index.js';
 import type { StreamingCallbacks } from '../../sdk-handlers/base/types.js';
 import { normalizeRawSdkResponse } from '../../sdk-handlers/normalizer-factory.js';
+import { isSdkHealthAbort } from '../../sdk-watchdog.js';
 import type { AgorClient } from '../../services/feathers-client.js';
 import { configureSessionGitSafeDirectories } from './git-safe-directory.js';
 
@@ -131,7 +132,8 @@ export interface ExecutionContext {
 export function createStreamingCallbacks(
   client: AgorClient,
   toolName: string,
-  sessionId: SessionID
+  sessionId: SessionID,
+  onPulse?: StreamingCallbacks['onPulse']
 ): StreamingCallbacks {
   // Use session_id passed in (available before any streaming starts)
   // This ensures thinking events have session_id even if they fire before onStreamStart
@@ -149,6 +151,7 @@ export function createStreamingCallbacks(
   };
 
   return {
+    onPulse,
     onStreamStart: async (message_id, data) => {
       // Initialize sequence counter for this message
       sequenceCounters.set(message_id, 0);
@@ -224,12 +227,13 @@ export function createStreamingCallbacks(
 export function createExecutionContext(
   client: AgorClient,
   toolName: string,
-  sessionId: SessionID
+  sessionId: SessionID,
+  onPulse?: StreamingCallbacks['onPulse']
 ): ExecutionContext {
   return {
     client,
     repos: createFeathersBackedRepositories(client),
-    callbacks: createStreamingCallbacks(client, toolName, sessionId),
+    callbacks: createStreamingCallbacks(client, toolName, sessionId, onPulse),
   };
 }
 
@@ -406,6 +410,7 @@ export async function executeToolTask(params: {
   abortController: AbortController;
   apiKeyEnvVar: ApiKeyName;
   toolName: AgenticToolName;
+  onPulse?: StreamingCallbacks['onPulse'];
   messageSource?: MessageSource;
   createTool: (
     repos: ReturnType<typeof createFeathersBackedRepositories>,
@@ -415,6 +420,7 @@ export async function executeToolTask(params: {
 }): Promise<void> {
   const { client, sessionId, taskId, prompt, permissionMode, apiKeyEnvVar, toolName, createTool } =
     params;
+  const coordinatorOwnsTerminality = () => isSdkHealthAbort(params.abortController);
 
   console.log(`[${toolName}] Executing task ${shortId(taskId)}...`);
 
@@ -463,7 +469,7 @@ export async function executeToolTask(params: {
     }
 
     // Create execution context
-    const ctx = createExecutionContext(client, toolName, sessionId);
+    const ctx = createExecutionContext(client, toolName, sessionId, params.onPulse);
 
     // Create tool instance using factory function
     // Pass the resolved key (or empty string) and useNativeAuth flag
@@ -508,6 +514,8 @@ export async function executeToolTask(params: {
       params.abortController,
       params.messageSource
     );
+
+    if (coordinatorOwnsTerminality()) return;
 
     console.log(
       `[${toolName}] Execution completed: user=${result.userMessageId}, assistant=${result.assistantMessageIds.length} messages`
@@ -618,6 +626,7 @@ export async function executeToolTask(params: {
     // The tasks.ts patch hook guards against double-updates (wasAlreadyTerminal check).
     await client.service('tasks').patch(taskId, patchData);
   } catch (error) {
+    if (coordinatorOwnsTerminality()) return;
     const err = error instanceof Error ? error : new Error(String(error));
     console.error(`[${toolName}] Execution failed:`, err);
 

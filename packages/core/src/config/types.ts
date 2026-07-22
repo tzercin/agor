@@ -317,13 +317,21 @@ export interface AgorExecutionSettings {
   /**
    * Lightweight heartbeat settings for long-running executor tasks.
    *
-   * The executor patches `tasks.last_executor_heartbeat_at` immediately and
-   * then every `interval_ms` while a task is active. The daemon may mark stale
-   * active tasks failed after `stale_after_ms` without retrying automatically.
+   * The executor reports `tasks.last_executor_heartbeat_at` immediately and
+   * then every `interval_ms` while a task is active. After `stale_after_ms`,
+   * the daemon requests containment and fails the task only after verified absence.
    * Optional callbacks are shell commands that receive a small JSON payload on
    * stdin; keep secrets out of the command argv.
    */
   executor_heartbeat?: AgorExecutorHeartbeatSettings;
+  sdk_watchdog?: {
+    mode?: 'disabled' | 'observe' | 'enforce';
+    first_progress_timeout_ms?: number;
+    abort_grace_ms?: number;
+    claude_idle_timeout_ms?: number | null;
+  };
+
+  dispatch_connect_timeout_ms?: number | null;
 
   /** Unix user to run executors as (default: undefined = run as daemon user). When set, uses sudo impersonation. */
   executor_unix_user?: string;
@@ -463,6 +471,9 @@ export interface AgorExecutionSettings {
    * ```
    */
   executor_command_template?: string;
+
+  /** A nonzero template launcher may still have submitted remote work. Default: false. */
+  executor_command_nonzero_may_have_dispatched?: boolean;
 
   /**
    * Required user environment variables.

@@ -38,7 +38,7 @@ import {
   validateRenderedManagedEnvUrlFields,
   validateRepoEnvironmentLifecyclePolicy,
 } from '@agor/core/environment/webhook';
-import type { Application } from '@agor/core/feathers';
+import type { Application, FeathersService } from '@agor/core/feathers';
 import { BadRequest, Forbidden, NotAuthenticated } from '@agor/core/feathers';
 import {
   boardCommentQueryValidator,
@@ -64,6 +64,7 @@ import type {
   Paginated,
   Params,
   Session,
+  Task,
   User,
   UserID,
 } from '@agor/core/types';
@@ -73,12 +74,18 @@ import {
   GATEWAY_SENSITIVE_CONFIG_FIELDS,
   hasMinimumRole,
   ROLES,
+  TaskStatus,
 } from '@agor/core/types';
-import { executorRuntimeScopeGuard } from './auth/executor-runtime-scope.js';
+import {
+  executorRuntimeScopeGuard,
+  isTaskScopedExecutorRequest,
+  requireExecutorRuntimeToken,
+} from './auth/executor-runtime-scope.js';
 import type {
   BoardsServiceImpl,
   MessagesServiceImpl,
   SessionsServiceImpl,
+  TasksServiceImpl,
 } from './declarations.js';
 import { classifyMissingCredentialFailure } from './hooks/classify-missing-credential.js';
 import { gatewayRouteHook } from './hooks/gateway-route.js';
@@ -459,6 +466,73 @@ const TENANT_IDENTITY_ONLY_SERVICE_PATHS = [
   'cursor-models',
   'terminals',
 ] as const;
+
+const taskFieldSet = (...fields: (keyof Task)[]) => new Set<string>(fields);
+
+const EXECUTOR_TASK_PATCH_FIELDS = taskFieldSet(
+  'status',
+  'completed_at',
+  'git_state',
+  'message_range',
+  'model',
+  'raw_sdk_response',
+  'normalized_sdk_response',
+  'computed_context_window',
+  'tool_use_count',
+  'duration_ms',
+  'agent_session_id',
+  'error_message',
+  'report',
+  'permission_request',
+  'session_md5'
+);
+
+const EXTERNAL_TASK_CREATE_FIELDS = taskFieldSet('session_id', 'full_prompt', 'status');
+
+/** Keep the documented two-step create/run API dormant until the explicit run call. */
+export function protectExternalTaskCreate(context: HookContext): HookContext {
+  if (!context.params.provider) return context;
+
+  const data =
+    context.data && typeof context.data === 'object' && !Array.isArray(context.data)
+      ? (context.data as Record<string, unknown>)
+      : undefined;
+  if (!data) throw new BadRequest('Task creation requires one task');
+
+  const unsupported = Object.keys(data).find((field) => !EXTERNAL_TASK_CREATE_FIELDS.has(field));
+  if (unsupported) throw new BadRequest(`Task create field is not client-managed: ${unsupported}`);
+  if (typeof data.session_id !== 'string' || !data.session_id) {
+    throw new BadRequest('session_id is required when creating a task');
+  }
+  if (typeof data.full_prompt !== 'string') {
+    throw new BadRequest('full_prompt is required when creating a task');
+  }
+  if (data.status !== undefined && data.status !== TaskStatus.CREATED) {
+    throw new BadRequest('Externally created tasks must use status created');
+  }
+
+  data.status = TaskStatus.CREATED;
+  return context;
+}
+
+/** Prevent callers on a Feathers transport from forging executor-owned task state. */
+export async function protectServerManagedTaskWrites(context: HookContext): Promise<HookContext> {
+  if (!context.params.provider) return context;
+
+  if (typeof context.id !== 'string' || !isTaskScopedExecutorRequest(context, context.id)) {
+    throw new Forbidden('Task patches require an executor token scoped to this task');
+  }
+
+  const write =
+    context.data && typeof context.data === 'object' && !Array.isArray(context.data)
+      ? (context.data as Record<string, unknown>)
+      : undefined;
+  if (!write || Object.keys(write).some((field) => !EXECUTOR_TASK_PATCH_FIELDS.has(field))) {
+    throw new Forbidden('Task patch contains fields that are not executor-managed');
+  }
+
+  return context;
+}
 
 export function registerHooks(ctx: RegisterHooksContext): void {
   const {
@@ -2898,7 +2972,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // Tasks hooks
   // ============================================================================
 
-  app.service('tasks').hooks({
+  const tasksService = app.service('tasks') as FeathersService<Application, TasksServiceImpl>;
+  tasksService.hooks({
     before: {
       all: [typedValidateQuery(taskQueryValidator), requireAuth, executorRuntimeScopeGuard()],
       find: [
@@ -2926,9 +3001,11 @@ export function registerHooks(ctx: RegisterHooksContext): void {
               ensureCanPromptInSession(superadminOpts), // Require 'prompt' (or 'session' for own sessions)
             ]
           : []),
+        protectExternalTaskCreate,
         injectCreatedBy(),
       ],
       patch: [
+        protectServerManagedTaskWrites,
         ...(branchRbacEnabled
           ? [
               resolveSessionContext(),
@@ -2938,6 +3015,9 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             ]
           : []),
       ],
+      connectExecutor: [requireExecutorRuntimeToken()],
+      reportRuntimeTelemetry: [requireExecutorRuntimeToken()],
+      reportSdkHealthFailure: [requireExecutorRuntimeToken()],
       remove: [
         requireMinimumRole(ROLES.MEMBER, 'delete tasks'),
         // RBAC: deleting a task requires 'all' permission on the branch
