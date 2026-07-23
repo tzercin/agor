@@ -89,6 +89,20 @@ describe('MarkdownRenderer', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('renders links as new-tab anchors without a confirmation interstitial', async () => {
+    render(<MarkdownRenderer content={'[Private PR #1](https://github.com/acme/repo/pull/1)'} />);
+
+    // Link safety is disabled, so links are plain anchors (not <button>s) that
+    // open in a new tab — no modal, no click interception.
+    const link = await screen.findByRole('link', { name: 'Private PR #1' });
+    expect(link).toHaveAttribute('href', 'https://github.com/acme/repo/pull/1');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', expect.stringContaining('noreferrer'));
+
+    fireEvent.click(link);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
   it('adds stable ids and self-links when heading anchors are enabled', async () => {
     const { container } = render(<MarkdownRenderer content={'## Foo\n\n## Foo!'} headingAnchors />);
 
@@ -131,7 +145,7 @@ describe('MarkdownRenderer', () => {
     expect(actions?.parentElement).toHaveStyle({
       display: 'flex',
       height: '2rem',
-      marginTop: '-2.5rem',
+      marginTop: '-2rem',
     });
     expect(body).toHaveStyle({ overflowX: 'auto' });
     expect(markdownRendererStyles).toContain('white-space: pre !important');
