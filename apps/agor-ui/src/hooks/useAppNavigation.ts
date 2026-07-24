@@ -152,7 +152,14 @@ export function useAppNavigation({
           ? (branchByIdRef.current ?? agorStore.getState().branchById).get(session.branch_id)
           : undefined;
         if (branch?.board_id) {
-          recenterMap(branch.branch_id, { boardId: branch.board_id, sessionId });
+          // ensureVisible: selecting an already-open session shouldn't
+          // yank the camera when its row is already on screen — only
+          // nudge it into view when it isn't. See CanvasNavigationContext.
+          recenterMap(branch.branch_id, {
+            boardId: branch.board_id,
+            sessionId,
+            ensureVisible: true,
+          });
         }
       }
     },

@@ -434,7 +434,11 @@ export function useUrlState(options: UseUrlStateOptions) {
     // can cancel a stale pending recenter before it fires.
     // Session URLs carry `sessionId` so the canvas aims at the session's
     // row inside the card (not the card head — that jerk was the reported
-    // bug). Branch/artifact deep links center on the node itself.
+    // bug). `ensureVisible` keeps the pan conditional: if the row is
+    // already on screen (e.g. selecting another session on the same
+    // visible card) the camera holds still; deep links and cross-board
+    // hops still bring the off-screen row into view. Branch/artifact deep
+    // links center on the node itself.
     if (urlParamsChanged && recenterTargetId && resolvedBoardId) {
       // Any pending timer was cleared at the top of this effect when
       // `urlParamsChanged` flipped — safe to schedule fresh.
@@ -443,7 +447,7 @@ export function useUrlState(options: UseUrlStateOptions) {
       const sessionId = recenterSessionId ?? undefined;
       deferredRecenterTimerRef.current = setTimeout(() => {
         deferredRecenterTimerRef.current = null;
-        recenterMap(target, { boardId, sessionId });
+        recenterMap(target, { boardId, sessionId, ensureVisible: sessionId != null });
       }, 50);
     }
   }, [

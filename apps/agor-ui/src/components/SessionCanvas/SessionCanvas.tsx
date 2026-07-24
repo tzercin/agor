@@ -1025,7 +1025,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // boardObjectById lookup through every caller, we accept the logical
     // id and fall back to a `data.artifactId` scan when `getNode` misses.
     const recenterOnNode = useCallback(
-      (nodeId: string, subTarget?: { sessionId?: string }): boolean => {
+      (nodeId: string, subTarget?: { sessionId?: string; ensureVisible?: boolean }): boolean => {
         const instance = reactFlowInstanceRef.current;
         if (!instance) return false;
         const allNodes = instance.getNodes();
@@ -1060,6 +1060,56 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             const nodeRect = nodeEl.getBoundingClientRect();
             const rowRect = rowEl.getBoundingClientRect();
             centerY = absPos.y + (rowRect.top - nodeRect.top + rowRect.height / 2) / zoom;
+
+            // Ensure-visible mode (session selection): don't move the
+            // camera when the row is already fully on screen — a pan on
+            // every click is disorienting and costs the user their
+            // context. When the row is off screen or cut off, pan just
+            // enough to bring it into view (with a small margin) rather
+            // than re-centering. See CanvasNavigationContext for why
+            // deliberate gestures skip this.
+            if (subTarget.ensureVisible) {
+              const paneEl = nodeEl.closest('.react-flow');
+              if (paneEl) {
+                // The canvas root defaults to `height: 100vh` (see the
+                // `height` prop) but sits below the app header inside an
+                // overflow-clipped panel, so the pane element extends past
+                // the bottom of the window by the header's height. Clamp
+                // the pane rect to the window so "visible" means what the
+                // user can actually see — unclamped, rows panned to the
+                // pane's bottom edge land hidden below the fold, and rows
+                // already in that phantom strip are wrongly treated as
+                // on-screen.
+                const paneRect = paneEl.getBoundingClientRect();
+                const viewLeft = Math.max(paneRect.left, 0);
+                const viewTop = Math.max(paneRect.top, 0);
+                const viewRight = Math.min(paneRect.right, document.documentElement.clientWidth);
+                const viewBottom = Math.min(paneRect.bottom, document.documentElement.clientHeight);
+                const margin = 32;
+                let shiftX = 0;
+                let shiftY = 0;
+                if (rowRect.left < viewLeft + margin) {
+                  shiftX = viewLeft + margin - rowRect.left;
+                } else if (rowRect.right > viewRight - margin) {
+                  shiftX = viewRight - margin - rowRect.right;
+                }
+                if (rowRect.top < viewTop + margin) {
+                  shiftY = viewTop + margin - rowRect.top;
+                } else if (rowRect.bottom > viewBottom - margin) {
+                  shiftY = viewBottom - margin - rowRect.bottom;
+                }
+                // Already fully visible — leave the camera where it is.
+                if (shiftX === 0 && shiftY === 0) return true;
+                // Pan by the screen-space delta (viewport transform is in
+                // screen px), keeping zoom unchanged.
+                const vp = instance.getViewport();
+                instance.setViewport(
+                  { x: vp.x + shiftX, y: vp.y + shiftY, zoom: vp.zoom },
+                  { duration: 400 }
+                );
+                return true;
+              }
+            }
           }
         }
         instance.setCenter(centerX, centerY, {
@@ -1506,7 +1556,13 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         // Falls back to fitView when the pending target isn't on this board
         // either (stale/unknown id).
         const pending = consumePendingRecenter();
-        if (pending && recenterOnNode(pending.nodeId, { sessionId: pending.sessionId })) {
+        if (
+          pending &&
+          recenterOnNode(pending.nodeId, {
+            sessionId: pending.sessionId,
+            ensureVisible: pending.ensureVisible,
+          })
+        ) {
           lastFitBoardIdRef.current = board?.board_id ?? null;
           return;
         }
@@ -2417,20 +2473,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     ]);
 
     // Node click handler for eraser mode and comment placement
-    // Double-clicking a branch card pans the camera onto it — the same
-    // movement as the "Go to card on board" locator button. When the
-    // double-click lands on a session row inside the card, aim at that
-    // row instead so the gesture agrees with single-click selection.
-    const handleNodeDoubleClick = useCallback(
-      (event: React.MouseEvent, node: Node) => {
-        if (node.type !== 'branchNode') return;
-        const row = (event.target as HTMLElement | null)?.closest?.('[data-session-id]');
-        const sessionId = row?.getAttribute('data-session-id') ?? undefined;
-        recenterOnNode(node.id, { sessionId });
-      },
-      [recenterOnNode]
-    );
-
     const handleNodeClick = useCallback(
       (event: React.MouseEvent, node: Node) => {
         if (activeTool === 'eraser') {
@@ -2557,7 +2599,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             onNodeDrag={handleNodeDrag}
             onNodeDragStop={handleNodeDragStop}
             onNodeClick={handleNodeClick}
-            onNodeDoubleClick={handleNodeDoubleClick}
             onPaneClick={handlePaneClick}
             onInit={(instance) => {
               reactFlowInstanceRef.current = instance;
@@ -2586,10 +2627,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // Disable React Flow's keyboard shortcuts that conflict with typing/spatial messages.
             // Keep modifier-scroll zoom enabled so Command/Control + scroll behaves like Figma.
             deleteKeyCode={null}
-            // Double-click recenters branch cards (onNodeDoubleClick above);
-            // d3-zoom's dblclick.zoom would fight that animation, so the
-            // default double-click zoom is disabled.
-            zoomOnDoubleClick={false}
             selectionKeyCode={null}
             multiSelectionKeyCode={null}
             panActivationKeyCode={null}

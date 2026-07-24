@@ -144,7 +144,9 @@ describe('useAppNavigation.goToSession', () => {
     // The reported bug was the camera jerking to the branch card's head
     // when a session was selected. The fix keeps the pan but aims it at
     // the session's own row inside the card: the recenter must carry the
-    // session id as a sub-target.
+    // session id as a sub-target, and `ensureVisible` so the camera only
+    // moves when that row isn't already on screen (no jump on a re-click
+    // of a session that's already in view).
     const session = {
       session_id: NEW_SESSION_ID,
       branch_id: EXISTING_BRANCH_ID,
@@ -172,7 +174,10 @@ describe('useAppNavigation.goToSession', () => {
       result.current.nav.goToSession(NEW_SESSION_ID);
     });
 
-    expect(recenter).toHaveBeenCalledWith(EXISTING_BRANCH_ID, { sessionId: NEW_SESSION_ID });
+    expect(recenter).toHaveBeenCalledWith(EXISTING_BRANCH_ID, {
+      sessionId: NEW_SESSION_ID,
+      ensureVisible: true,
+    });
     expect(result.current.pathname).toBe(`/s/${NEW_SESSION_SHORT}/`);
   });
 });

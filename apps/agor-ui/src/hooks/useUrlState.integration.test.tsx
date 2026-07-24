@@ -263,7 +263,8 @@ describe('useUrlState — session selection recenters onto the session row', () 
       // currentBoardId === the session's board → same-board selection.
       // The recenter must carry the session id so the canvas aims at the
       // session's row inside the card instead of jerking to the card head
-      // (the reported bug).
+      // (the reported bug), plus `ensureVisible` so the pan is conditional
+      // — the camera holds still when the row is already on screen.
       renderAt(
         `/s/${SESSION_SHORT}/`,
         baseOptions({
@@ -279,7 +280,10 @@ describe('useUrlState — session selection recenters onto the session row', () 
         vi.advanceTimersByTime(100);
       });
 
-      expect(recenter).toHaveBeenCalledWith(BRANCH_ID, { sessionId: SESSION_ID });
+      expect(recenter).toHaveBeenCalledWith(BRANCH_ID, {
+        sessionId: SESSION_ID,
+        ensureVisible: true,
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -313,7 +317,10 @@ describe('useUrlState — session selection recenters onto the session row', () 
         vi.advanceTimersByTime(100);
       });
 
-      expect(recenter).toHaveBeenCalledWith(BRANCH_ID, { sessionId: SESSION_ID });
+      expect(recenter).toHaveBeenCalledWith(BRANCH_ID, {
+        sessionId: SESSION_ID,
+        ensureVisible: true,
+      });
     } finally {
       vi.useRealTimers();
     }
