@@ -1,8 +1,8 @@
 class AgorLive < Formula
   desc "Team command center for all things agentic"
   homepage "https://agor.live"
-  url "https://registry.npmjs.org/agor-live/-/agor-live-0.21.0.tgz"
-  sha256 "26c4ffb68c09b511349ee975c9e97605d21cfed8a130e95827c54de433ac08f7"
+  url "https://registry.npmjs.org/agor-live/-/agor-live-0.25.2.tgz"
+  sha256 "a4da848f2cbcc08101f571df673a7160f073a40d4d43dacbf2640e3a01fecfc5"
   license "BUSL-1.1"
 
   depends_on "node@24"
